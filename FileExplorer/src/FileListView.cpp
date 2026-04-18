@@ -4,6 +4,7 @@
 #include <Shlwapi.h>
 #include <Windowsx.h>
 #include <strsafe.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <cwchar>
@@ -18,14 +19,19 @@ namespace {
 constexpr UINT_PTR kListViewSubclassId = 1;
 constexpr UINT_PTR kLoadingTimerId = 9001;
 
-constexpr COLORREF kListBackgroundColor = RGB(0x1F, 0x1F, 0x1F);
-constexpr COLORREF kListTextColor = RGB(0xE8, 0xE8, 0xE8);
-constexpr COLORREF kDividerBackgroundColor = RGB(0x2A, 0x2A, 0x2A);
-constexpr COLORREF kDividerTextColor = RGB(0xB9, 0xB9, 0xB9);
-constexpr COLORREF kEmptyStateTextColor = RGB(0xAA, 0xAA, 0xAA);
-constexpr COLORREF kLoadingOverlayBackgroundColor = RGB(0x30, 0x30, 0x30);
-constexpr COLORREF kLoadingOverlayBorderColor = RGB(0x4A, 0x4A, 0x4A);
-constexpr COLORREF kLoadingOverlayTextColor = RGB(0xE2, 0xE2, 0xE2);
+constexpr COLORREF kListBackgroundColor = RGB(0x18, 0x1C, 0x22);
+constexpr COLORREF kListTextColor = RGB(0xE2, 0xE8, 0xEF);
+constexpr COLORREF kHeaderBackgroundColor = RGB(0x1F, 0x25, 0x2D);
+constexpr COLORREF kHeaderHoverBackgroundColor = RGB(0x24, 0x2B, 0x35);
+constexpr COLORREF kHeaderTextColor = RGB(0xD2, 0xDA, 0xE4);
+constexpr COLORREF kHeaderDividerColor = RGB(0x33, 0x3B, 0x47);
+constexpr COLORREF kHeaderSortGlyphColor = RGB(0xA9, 0xB4, 0xC2);
+constexpr COLORREF kDividerBackgroundColor = RGB(0x1E, 0x24, 0x2B);
+constexpr COLORREF kDividerTextColor = RGB(0xAC, 0xB6, 0xC2);
+constexpr COLORREF kEmptyStateTextColor = RGB(0x9F, 0xA8, 0xB5);
+constexpr COLORREF kLoadingOverlayBackgroundColor = RGB(0x24, 0x2A, 0x33);
+constexpr COLORREF kLoadingOverlayBorderColor = RGB(0x3A, 0x43, 0x4F);
+constexpr COLORREF kLoadingOverlayTextColor = RGB(0xDF, 0xE5, 0xEE);
 
 constexpr UINT kMenuCopy = 7001;
 constexpr UINT kMenuCut = 7002;
@@ -43,6 +49,12 @@ void LogLastError(const wchar_t* context) {
     const DWORD error_code = GetLastError();
     wchar_t buffer[256] = {};
     swprintf_s(buffer, L"[FileExplorer] %s failed (GetLastError=%lu).\r\n", context, error_code);
+    OutputDebugStringW(buffer);
+}
+
+void LogHResult(const wchar_t* context, HRESULT hr) {
+    wchar_t buffer[256] = {};
+    swprintf_s(buffer, L"[FileExplorer] %s failed (HRESULT=0x%08lX).\r\n", context, static_cast<unsigned long>(hr));
     OutputDebugStringW(buffer);
 }
 
@@ -162,6 +174,7 @@ bool FileListView::Create(HWND parent, HINSTANCE instance, int control_id) {
 
     CreateColumns();
     ApplyScaledColumns();
+    ApplyHeaderVisualStyle();
     EnsureSystemImageList();
     EnsureDividerFont();
     UpdateSortIndicators();
@@ -179,6 +192,7 @@ void FileListView::SetDpi(UINT dpi) {
     divider_font_height_ = 0;
     EnsureDividerFont();
     ApplyScaledColumns();
+    ApplyHeaderVisualStyle();
     InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
@@ -297,7 +311,16 @@ const std::wstring& FileListView::current_path() const noexcept {
 
 bool FileListView::HandleNotify(LPARAM l_param, LRESULT* result) {
     auto* header = reinterpret_cast<NMHDR*>(l_param);
-    if (header == nullptr || header->hwndFrom != hwnd_) {
+    if (header == nullptr) {
+        return false;
+    }
+
+    HWND list_header = (hwnd_ != nullptr) ? ListView_GetHeader(hwnd_) : nullptr;
+    if (list_header != nullptr && header->hwndFrom == list_header && header->code == NM_CUSTOMDRAW) {
+        return HandleHeaderCustomDraw(reinterpret_cast<NMCUSTOMDRAW*>(l_param), result);
+    }
+
+    if (header->hwndFrom != hwnd_) {
         return false;
     }
 
@@ -447,6 +470,24 @@ void FileListView::ApplyScaledColumns() {
     }
 }
 
+void FileListView::ApplyHeaderVisualStyle() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+
+    HWND header = ListView_GetHeader(hwnd_);
+    if (header == nullptr) {
+        return;
+    }
+
+    const HRESULT theme_result = SetWindowTheme(header, L"", L"");
+    if (FAILED(theme_result)) {
+        LogHResult(L"SetWindowTheme(ListHeader)", theme_result);
+    }
+
+    InvalidateRect(header, nullptr, TRUE);
+}
+
 void FileListView::EnsureSystemImageList() {
     if (system_image_list_ != nullptr || hwnd_ == nullptr) {
         return;
@@ -592,6 +633,115 @@ bool FileListView::HandleCustomDraw(NMLVCUSTOMDRAW* custom_draw, LRESULT* result
         const COLORREF extension_color = ColorForExtension(entry.extension, entry.is_folder);
         custom_draw->clrText = (extension_color == CLR_INVALID) ? kListTextColor : extension_color;
         *result = CDRF_DODEFAULT;
+        return true;
+    }
+
+    default:
+        break;
+    }
+
+    return false;
+}
+
+bool FileListView::HandleHeaderCustomDraw(NMCUSTOMDRAW* custom_draw, LRESULT* result) const {
+    if (custom_draw == nullptr || result == nullptr) {
+        return false;
+    }
+
+    HWND header = (hwnd_ != nullptr) ? ListView_GetHeader(hwnd_) : nullptr;
+    if (header == nullptr) {
+        return false;
+    }
+
+    switch (custom_draw->dwDrawStage) {
+    case CDDS_PREPAINT:
+        *result = CDRF_NOTIFYITEMDRAW;
+        return true;
+
+    case CDDS_ITEMPREPAINT: {
+        const int column_index = static_cast<int>(custom_draw->dwItemSpec);
+        RECT rect = custom_draw->rc;
+        const bool hot = (custom_draw->uItemState & CDIS_HOT) != 0;
+
+        HBRUSH header_brush = CreateSolidBrush(hot ? kHeaderHoverBackgroundColor : kHeaderBackgroundColor);
+        if (header_brush != nullptr) {
+            FillRect(custom_draw->hdc, &rect, header_brush);
+            DeleteObject(header_brush);
+        }
+
+        wchar_t text_buffer[128] = {};
+        HDITEMW item = {};
+        item.mask = HDI_TEXT | HDI_FORMAT;
+        item.pszText = text_buffer;
+        item.cchTextMax = static_cast<int>(sizeof(text_buffer) / sizeof(text_buffer[0]));
+        if (!Header_GetItem(header, column_index, &item)) {
+            LogLastError(L"Header_GetItem(CustomDraw)");
+            item.pszText = const_cast<LPWSTR>(L"");
+            item.fmt = HDF_LEFT;
+        }
+
+        const int text_padding = MulDiv(8, static_cast<int>(dpi_), 96);
+        const bool sorted_column = column_index == static_cast<int>(sort_column_);
+        const int sort_reserved_width = sorted_column ? MulDiv(12, static_cast<int>(dpi_), 96) : 0;
+
+        RECT text_rect = rect;
+        text_rect.left += text_padding;
+        text_rect.right -= text_padding + sort_reserved_width;
+
+        SetBkMode(custom_draw->hdc, TRANSPARENT);
+        SetTextColor(custom_draw->hdc, kHeaderTextColor);
+
+        UINT text_flags = DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX;
+        if ((item.fmt & HDF_RIGHT) != 0) {
+            text_flags |= DT_RIGHT;
+        } else {
+            text_flags |= DT_LEFT;
+        }
+        DrawTextW(custom_draw->hdc, text_buffer, -1, &text_rect, text_flags);
+
+        if (sorted_column) {
+            const int arrow_width = MulDiv(8, static_cast<int>(dpi_), 96);
+            const int arrow_height = MulDiv(5, static_cast<int>(dpi_), 96);
+            const int center_x = rect.right - text_padding - (arrow_width / 2);
+            const int center_y = rect.top + ((rect.bottom - rect.top) / 2);
+
+            POINT points[3] = {};
+            if (sort_direction_ == SortDirection::Ascending) {
+                points[0] = {center_x - (arrow_width / 2), center_y + (arrow_height / 2)};
+                points[1] = {center_x + (arrow_width / 2), center_y + (arrow_height / 2)};
+                points[2] = {center_x, center_y - (arrow_height / 2)};
+            } else {
+                points[0] = {center_x - (arrow_width / 2), center_y - (arrow_height / 2)};
+                points[1] = {center_x + (arrow_width / 2), center_y - (arrow_height / 2)};
+                points[2] = {center_x, center_y + (arrow_height / 2)};
+            }
+
+            HBRUSH arrow_brush = CreateSolidBrush(kHeaderSortGlyphColor);
+            if (arrow_brush != nullptr) {
+                HGDIOBJ old_pen = SelectObject(custom_draw->hdc, GetStockObject(NULL_PEN));
+                HGDIOBJ old_brush = SelectObject(custom_draw->hdc, arrow_brush);
+                Polygon(custom_draw->hdc, points, 3);
+                SelectObject(custom_draw->hdc, old_brush);
+                SelectObject(custom_draw->hdc, old_pen);
+                DeleteObject(arrow_brush);
+            }
+        }
+
+        const int column_count = Header_GetItemCount(header);
+        HPEN divider_pen = CreatePen(PS_SOLID, 1, kHeaderDividerColor);
+        if (divider_pen != nullptr) {
+            HGDIOBJ old_pen = SelectObject(custom_draw->hdc, divider_pen);
+            if (column_index + 1 < column_count) {
+                MoveToEx(custom_draw->hdc, rect.right - 1, rect.top + MulDiv(3, static_cast<int>(dpi_), 96), nullptr);
+                LineTo(custom_draw->hdc, rect.right - 1, rect.bottom - 1);
+            }
+            MoveToEx(custom_draw->hdc, rect.left, rect.bottom - 1, nullptr);
+            LineTo(custom_draw->hdc, rect.right, rect.bottom - 1);
+            SelectObject(custom_draw->hdc, old_pen);
+            DeleteObject(divider_pen);
+        }
+
+        *result = CDRF_SKIPDEFAULT;
         return true;
     }
 

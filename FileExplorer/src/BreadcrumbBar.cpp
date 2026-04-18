@@ -2,6 +2,7 @@
 
 #include <Windowsx.h>
 #include <Shlwapi.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <cwchar>
@@ -13,12 +14,13 @@ namespace {
 
 constexpr wchar_t kBreadcrumbClassName[] = L"FE_BreadcrumbBar";
 
-constexpr COLORREF kBackgroundColor = RGB(0x24, 0x24, 0x24);
-constexpr COLORREF kTextColor = RGB(0xE8, 0xE8, 0xE8);
-constexpr COLORREF kHoverFillColor = RGB(0x3A, 0x3A, 0x3A);
-constexpr COLORREF kSeparatorColor = RGB(0xA2, 0xA2, 0xA2);
-constexpr COLORREF kEditBackgroundColor = RGB(0x2A, 0x2A, 0x2A);
-constexpr COLORREF kEditTextColor = RGB(0xEB, 0xEB, 0xEB);
+constexpr COLORREF kBackgroundColor = RGB(0x20, 0x26, 0x2F);
+constexpr COLORREF kBorderColor = RGB(0x37, 0x40, 0x4B);
+constexpr COLORREF kTextColor = RGB(0xE2, 0xE8, 0xF0);
+constexpr COLORREF kHoverFillColor = RGB(0x2C, 0x34, 0x3F);
+constexpr COLORREF kSeparatorColor = RGB(0x9B, 0xA4, 0xB2);
+constexpr COLORREF kEditBackgroundColor = RGB(0x20, 0x26, 0x2F);
+constexpr COLORREF kEditTextColor = RGB(0xE2, 0xE8, 0xF0);
 
 constexpr UINT_PTR kEditSubclassId = 1;
 constexpr UINT kSiblingMenuIdBase = 6000;
@@ -88,6 +90,28 @@ struct FindHandle {
         }
     }
 };
+
+void FillRoundedRect(HDC hdc, const RECT& rect, COLORREF fill, COLORREF border, int radius) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    if (brush == nullptr || pen == nullptr) {
+        if (brush != nullptr) {
+            DeleteObject(brush);
+        }
+        if (pen != nullptr) {
+            DeleteObject(pen);
+        }
+        return;
+    }
+
+    HGDIOBJ old_brush = SelectObject(hdc, brush);
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
 
 }  // namespace
 
@@ -224,7 +248,7 @@ bool BreadcrumbBar::CreateEditControl() {
         0,
         WC_EDITW,
         L"",
-        WS_CHILD | WS_BORDER | ES_AUTOHSCROLL,
+        WS_CHILD | ES_AUTOHSCROLL,
         0,
         0,
         0,
@@ -242,6 +266,18 @@ bool BreadcrumbBar::CreateEditControl() {
         LogLastError(L"SetWindowSubclass(BreadcrumbEdit)");
         return false;
     }
+
+    const HRESULT set_theme_result = SetWindowTheme(edit_hwnd_, L"", L"");
+    if (FAILED(set_theme_result)) {
+        LogHResult(L"SetWindowTheme(BreadcrumbEdit)", set_theme_result);
+    }
+
+    const int margin = MulDiv(10, static_cast<int>(dpi_), 96);
+    SendMessageW(
+        edit_hwnd_,
+        EM_SETMARGINS,
+        EC_LEFTMARGIN | EC_RIGHTMARGIN,
+        MAKELPARAM(margin, margin));
 
     edit_background_brush_.reset(CreateSolidBrush(kEditBackgroundColor));
     if (!edit_background_brush_) {
@@ -269,7 +305,7 @@ void BreadcrumbBar::LayoutEditControl() {
         return;
     }
 
-    const int margin = MulDiv(3, static_cast<int>(dpi_), 96);
+    const int margin = MulDiv(2, static_cast<int>(dpi_), 96);
     const int width = (client_rect.right - client_rect.left) - (margin * 2);
     const int height = (client_rect.bottom - client_rect.top) - (margin * 2);
     if (!MoveWindow(edit_hwnd_, margin, margin, (std::max)(0, width), (std::max)(0, height), TRUE)) {
@@ -283,13 +319,14 @@ void BreadcrumbBar::DrawControl(HDC hdc) {
         return;
     }
 
-    HBRUSH background = CreateSolidBrush(kBackgroundColor);
-    if (background != nullptr) {
-        FillRect(hdc, &client_rect, background);
-        DeleteObject(background);
-    }
+    FillRoundedRect(
+        hdc,
+        client_rect,
+        kBackgroundColor,
+        kBorderColor,
+        MulDiv(6, static_cast<int>(dpi_), 96));
 
-    const int requested_pixel_height = -MulDiv(12, static_cast<int>(dpi_), 72);
+    const int requested_pixel_height = -MulDiv(9, static_cast<int>(dpi_), 72);
     if (font_ == nullptr || font_pixel_height_ != requested_pixel_height) {
         font_.reset(CreateFontW(
             requested_pixel_height,
@@ -331,14 +368,15 @@ void BreadcrumbBar::DrawControl(HDC hdc) {
             const SegmentLayout& segment = segments_[i];
 
             if (i == hovered_segment_index_) {
-                HBRUSH hover_brush = CreateSolidBrush(kHoverFillColor);
-                if (hover_brush != nullptr) {
-                    FillRect(hdc, &segment.segment_rect, hover_brush);
-                    DeleteObject(hover_brush);
-                }
+                FillRoundedRect(
+                    hdc,
+                    segment.segment_rect,
+                    kHoverFillColor,
+                    kHoverFillColor,
+                    MulDiv(6, static_cast<int>(dpi_), 96));
             }
 
-            const int segment_x = segment.segment_rect.left + MulDiv(7, static_cast<int>(dpi_), 96);
+            const int segment_x = segment.segment_rect.left + MulDiv(8, static_cast<int>(dpi_), 96);
             const int segment_y = segment.segment_rect.top +
                 ((segment.segment_rect.bottom - segment.segment_rect.top - metrics.tmHeight) / 2);
             TextOutW(
@@ -350,18 +388,19 @@ void BreadcrumbBar::DrawControl(HDC hdc) {
 
             if (i + 1 < static_cast<int>(segments_.size())) {
                 if (i == hovered_separator_index_) {
-                    HBRUSH hover_brush = CreateSolidBrush(kHoverFillColor);
-                    if (hover_brush != nullptr) {
-                        FillRect(hdc, &segment.separator_rect, hover_brush);
-                        DeleteObject(hover_brush);
-                    }
+                    FillRoundedRect(
+                        hdc,
+                        segment.separator_rect,
+                        kHoverFillColor,
+                        kHoverFillColor,
+                        MulDiv(6, static_cast<int>(dpi_), 96));
                 }
 
                 SetTextColor(hdc, kSeparatorColor);
                 const int sep_x = segment.separator_rect.left + MulDiv(7, static_cast<int>(dpi_), 96);
                 const int sep_y = segment.separator_rect.top +
                     ((segment.separator_rect.bottom - segment.separator_rect.top - metrics.tmHeight) / 2);
-                TextOutW(hdc, sep_x, sep_y, L">", 1);
+                TextOutW(hdc, sep_x, sep_y, L"\u203A", 1);
                 SetTextColor(hdc, kTextColor);
             }
         }
@@ -382,7 +421,7 @@ void BreadcrumbBar::EnsureSegmentsLayout() {
         return;
     }
 
-    const int requested_pixel_height = -MulDiv(12, static_cast<int>(dpi_), 72);
+    const int requested_pixel_height = -MulDiv(9, static_cast<int>(dpi_), 72);
     if (font_ == nullptr || font_pixel_height_ != requested_pixel_height) {
         font_.reset(CreateFontW(
             requested_pixel_height,
@@ -431,13 +470,13 @@ void BreadcrumbBar::RebuildSegments(HDC hdc) {
         return;
     }
 
-    const int margin = MulDiv(4, static_cast<int>(dpi_), 96);
-    const int segment_padding = MulDiv(7, static_cast<int>(dpi_), 96);
-    const int separator_padding = MulDiv(7, static_cast<int>(dpi_), 96);
+    const int margin = MulDiv(6, static_cast<int>(dpi_), 96);
+    const int segment_padding = MulDiv(8, static_cast<int>(dpi_), 96);
+    const int separator_padding = MulDiv(6, static_cast<int>(dpi_), 96);
     const int top = margin;
     const int bottom = (std::max)(top + 1, static_cast<int>(client_rect.bottom) - margin);
 
-    const int separator_width = MeasureTextWidth(hdc, L">") + (separator_padding * 2);
+    const int separator_width = MeasureTextWidth(hdc, L"\u203A") + (separator_padding * 2);
 
     int x = margin;
     for (int i = 0; i < static_cast<int>(segments_.size()); ++i) {

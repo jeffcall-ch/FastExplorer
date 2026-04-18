@@ -25,13 +25,14 @@ constexpr int kControlIdFileList = 1003;
 constexpr int kControlIdSidebar = 1004;
 constexpr int kControlIdStatusBar = 1005;
 
-constexpr COLORREF kFallbackBackgroundColor = RGB(0x1C, 0x1C, 0x1C);
-constexpr COLORREF kZoneTextColor = RGB(0xE8, 0xE8, 0xE8);
+constexpr COLORREF kFallbackBackgroundColor = RGB(0x16, 0x1A, 0x20);
+constexpr COLORREF kZoneTextColor = RGB(0xE2, 0xE7, 0xEE);
 
-constexpr COLORREF kNavBarColor = RGB(0x27, 0x27, 0x27);
-constexpr COLORREF kFileListColor = RGB(0x1F, 0x1F, 0x1F);
-constexpr COLORREF kSidebarColor = RGB(0x25, 0x25, 0x25);
-constexpr COLORREF kStatusBarColor = RGB(0x23, 0x23, 0x23);
+constexpr COLORREF kNavBarColor = RGB(0x1A, 0x1F, 0x26);
+constexpr COLORREF kFileListColor = RGB(0x18, 0x1C, 0x22);
+constexpr COLORREF kSidebarColor = RGB(0x1C, 0x22, 0x2A);
+constexpr COLORREF kStatusBarColor = RGB(0x16, 0x1A, 0x20);
+constexpr COLORREF kStatusBarSeparatorColor = RGB(0x2C, 0x33, 0x3D);
 constexpr UINT_PTR kFolderRefreshDebounceTimerId = 9201;
 constexpr UINT kFolderRefreshDebounceMs = 500;
 
@@ -248,7 +249,6 @@ bool MainWindow::CreateMainWindow(int show_command) {
 }
 
 bool MainWindow::InitializeChildZones() {
-    const DWORD child_style = WS_CHILD | WS_VISIBLE | WS_BORDER | SS_CENTER | SS_CENTERIMAGE;
     const DWORD child_ex_style = 0;
 
     if (!tab_strip_.Create(hwnd_, instance_, kControlIdTabStrip)) {
@@ -295,8 +295,8 @@ bool MainWindow::InitializeChildZones() {
     status_bar_hwnd_ = CreateWindowExW(
         child_ex_style,
         WC_STATICW,
-        L"Status Bar Zone",
-        child_style,
+        L"",
+        WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
         0,
         0,
         0,
@@ -399,6 +399,9 @@ void MainWindow::LayoutChildZones() {
 
     const int sidebar_width = std::min(metrics_.sidebarWidth, client_width);
     const int file_list_width = std::max(0, client_width - sidebar_width);
+    const int list_left_inset = MulDiv(10, static_cast<int>(dpi_), 96);
+    const int file_list_x = (std::min)(list_left_inset, file_list_width);
+    const int file_list_visible_width = (std::max)(0, file_list_width - file_list_x);
 
     if (!MoveWindow(tab_strip_hwnd_, 0, 0, client_width, tab_height, TRUE)) {
         LogLastError(L"MoveWindow(TabStrip)");
@@ -406,7 +409,7 @@ void MainWindow::LayoutChildZones() {
     if (!MoveWindow(nav_bar_hwnd_, 0, tab_height, client_width, nav_height, TRUE)) {
         LogLastError(L"MoveWindow(NavBarZone)");
     }
-    if (!MoveWindow(file_list_hwnd_, 0, content_top, file_list_width, content_height, TRUE)) {
+    if (!MoveWindow(file_list_hwnd_, file_list_x, content_top, file_list_visible_width, content_height, TRUE)) {
         LogLastError(L"MoveWindow(FileListZone)");
     }
     if (!MoveWindow(sidebar_hwnd_, file_list_width, content_top, sidebar_width, content_height, TRUE)) {
@@ -898,8 +901,66 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
             if (!SetWindowTextW(status_bar_hwnd_, status_text->c_str())) {
                 LogLastError(L"SetWindowTextW(StatusBar)");
             }
+            InvalidateRect(status_bar_hwnd_, nullptr, FALSE);
         }
         return 0;
+    }
+
+    case WM_DRAWITEM: {
+        auto* draw_item = reinterpret_cast<DRAWITEMSTRUCT*>(l_param);
+        if (draw_item == nullptr || draw_item->CtlID != kControlIdStatusBar) {
+            break;
+        }
+
+        RECT rect = draw_item->rcItem;
+        if (status_brush_ != nullptr) {
+            FillRect(draw_item->hDC, &rect, status_brush_.get());
+        } else {
+            HBRUSH fallback = CreateSolidBrush(kStatusBarColor);
+            if (fallback != nullptr) {
+                FillRect(draw_item->hDC, &rect, fallback);
+                DeleteObject(fallback);
+            }
+        }
+
+        HPEN separator_pen = CreatePen(PS_SOLID, 1, kStatusBarSeparatorColor);
+        if (separator_pen != nullptr) {
+            HGDIOBJ old_pen = SelectObject(draw_item->hDC, separator_pen);
+            MoveToEx(draw_item->hDC, rect.left, rect.top, nullptr);
+            LineTo(draw_item->hDC, rect.right, rect.top);
+            SelectObject(draw_item->hDC, old_pen);
+            DeleteObject(separator_pen);
+        }
+
+        wchar_t text[512] = {};
+        if (status_bar_hwnd_ != nullptr) {
+            GetWindowTextW(status_bar_hwnd_, text, static_cast<int>(sizeof(text) / sizeof(text[0])));
+        }
+
+        HFONT status_font = reinterpret_cast<HFONT>(SendMessageW(status_bar_hwnd_, WM_GETFONT, 0, 0));
+        HFONT old_font = nullptr;
+        if (status_font != nullptr) {
+            old_font = static_cast<HFONT>(SelectObject(draw_item->hDC, status_font));
+        }
+
+        RECT text_rect = rect;
+        text_rect.left += MulDiv(10, static_cast<int>(dpi_), 96);
+        text_rect.right -= MulDiv(8, static_cast<int>(dpi_), 96);
+
+        SetBkMode(draw_item->hDC, TRANSPARENT);
+        SetTextColor(draw_item->hDC, kZoneTextColor);
+        DrawTextW(
+            draw_item->hDC,
+            text,
+            -1,
+            &text_rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+        if (old_font != nullptr) {
+            SelectObject(draw_item->hDC, old_font);
+        }
+
+        return TRUE;
     }
 
     case WM_FE_FOLDER_LOADED: {

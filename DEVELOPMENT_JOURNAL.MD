@@ -26,7 +26,7 @@ Last updated:      2026-04-18 by assistant
 Current phase:     Phase 6 - Right Sidebar Shell
 Current target:    CP-06 (implementation complete, interactive verification pending)
 Last checkpoint:   CP-05 - PASS
-Build status:      PASS - Debug x64 solution build succeeds after wiring top-row flyout open action through the same deterministic click path
+Build status:      PASS - Debug x64 solution build succeeds after strict visual-only typography consistency refinement (tab/navbar text density matched to detail/sidebar scale)
 Tests status:      PASS - FileExplorer.Tests.exe runs and passes (0 tests, 0 failures)
 Blockers:          None
 ```
@@ -274,11 +274,100 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** All previously listed in AD-029 through AD-032 and retained here as explicit maintenance dead ends.  
 **Status:** Closed  
 
+### AD-034 - 2026-04-18 - Visual-Only Phase 6 Polish Pass (No Behavior Changes)
+**Decision:** Apply a contained visual-only polish across existing controls (tab strip, nav toolbar, breadcrumb surface/edit, list header, sidebar visuals, status/list-zone blending) without changing navigation, data, threading, or persistence behavior.  
+**Rationale:** User requested a modernized compact Windows 11 dark presentation while preserving existing structure, proportions, and interaction semantics.  
+**Alternatives considered:** Larger UI refactor or control replacement (rejected to keep risk low and preserve Phase 6 behavior stability).  
+**Status:** Closed  
+
+### AD-035 - 2026-04-18 - Strict Visual Correction Pass (Deeper Theming, Behavior Preserved)
+**Decision:** Perform a stricter visual-only correction pass focused on reducing default Win32 control chrome feel by tightening tab/nav/breadcrumb surfaces, switching header rendering to full dark custom item paint, owner-drawing status bar integration, and refining sidebar presentation.  
+**Rationale:** User requested a more cohesive Windows 11-inspired compact dark system without altering any underlying behavior.  
+**Alternatives considered:** Function-level refactors and behavioral changes (rejected to preserve existing validated navigation/search/favourites/tab logic).  
+**Status:** Closed  
+
+### AD-036 - 2026-04-18 - Typography Density Alignment (Tabs/Nav to Detail/Sidebar Scale)
+**Decision:** Reduce tab-strip and breadcrumb text size plus related nav/tab spacing so top-row typography density matches detail pane and right sidebar text scale.  
+**Rationale:** User reported that tab names and navbar text appeared visually larger than the rest of the app and requested consistency.  
+**Alternatives considered:** Keeping larger headline-like top-row typography (rejected), changing list/sidebar fonts upward instead (rejected to preserve existing comfortable data density).  
+**Status:** Closed  
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 031 - 2026-04-18
+**Phase:** Phase 6 - Right Sidebar Shell (visual consistency follow-up)  
+**Goal for this session:** Match tab/navbar typography and spacing density to detail pane and right sidebar scale.  
+**Completed:**  
+- Reduced tab-strip title font sizing and tightened tab text padding/vertical density (`TabStrip.cpp`).  
+- Reduced breadcrumb/address text size and segment spacing to align with detail/sidebar typography (`BreadcrumbBar.cpp`).  
+- Slightly reduced nav button size/gap and glyph font scale so the top row reads less oversized (`NavBar.cpp`).  
+- Rebuilt full solution (`Debug x64`) successfully.  
+- Ran tests (`FileExplorer.Tests.exe`) successfully (0 tests, 0 failures).  
+- Launched updated app build for interactive verification (`x64\\Debug\\FileExplorer.exe`, PID logged).  
+**Not completed / carried forward:**  
+- CP-06 remains pending final user interactive sign-off.  
+**Decisions made:** AD-036  
+**Errors encountered and resolved:**  
+- `LNK1168` while linking because `FileExplorer.exe` was running; resolved by stopping process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-06 - Partial (verification pending)  
+**Next session should start with:**  
+- Confirm typography balance in-app and continue with any final visual micro-adjustments requested by user.
+
+### Session 030 - 2026-04-18
+**Phase:** Phase 6 - Right Sidebar Shell (strict visual correction pass)  
+**Goal for this session:** Apply a stricter visual-only pass so UI reads as one cohesive dark design system while preserving layout/behavior.  
+**Completed:**  
+- Re-read required startup docs (`AGENTS.MD`, `DEVELOPMENT_JOURNAL.MD`, `IMPLEMENTATION_PLAN.md` -> `PLAN.MD`) and confirmed strict no-behavior-change scope.  
+- Updated tab strip visuals to reduce boxed-outline look and improve integrated active/inactive hierarchy (padding, hover/close/new/scroll visual treatment).  
+- Refined navigation toolbar visuals (compact 28x28 owner-draw buttons, subtle borders/hover/pressed/disabled states, cleaner row integration).  
+- Polished breadcrumb/address surface and edit-mode visuals for stronger single-control appearance while preserving auto-select/full-path edit behavior.  
+- Reworked details header custom draw to fully dark custom item rendering (`CDRF_SKIPDEFAULT` path), with restrained separators and custom sort glyphs.  
+- Increased main list left inset slightly for improved breathing room without pane-width/layout redesign.  
+- Improved sidebar search/section/item styling consistency (semibold headers, subtle surfaces/separators, calmer dark palette).  
+- Integrated status bar as owner-drawn dark surface with subtle top separator and compact text alignment.  
+- Built `Debug x64` successfully (`FileExplorer.sln`) and ran tests (`FileExplorer.Tests.exe`: 0 tests, 0 failures).  
+- Launched updated app build for user verification (`x64\\Debug\\FileExplorer.exe`, PID logged).  
+**Not completed / carried forward:**  
+- CP-06 remains pending final user interactive sign-off.  
+**Decisions made:** AD-035  
+**Errors encountered and resolved:**  
+- `msbuild` not on PATH in shell; resolved by using full VS 18 MSBuild path.  
+- `LNK1168` because `FileExplorer.exe` was running during link; resolved by stopping the process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-06 - Partial (verification pending)  
+**Next session should start with:**  
+- Run user visual verification checklist for strict correction targets (tabs/nav/address/header/list inset/sidebar/status), then iterate minor visuals or close CP-06 if accepted.
+
+### Session 029 - 2026-04-18
+**Phase:** Phase 6 - Right Sidebar Shell (visual-only refinement pass)  
+**Goal for this session:** Execute a conservative visual-only UI polish across tabs/nav/path/header/sidebar/status/list inset while preserving existing behavior and layout structure.  
+**Completed:**  
+- Re-read required startup docs (`AGENTS.MD`, `DEVELOPMENT_JOURNAL.MD`, `IMPLEMENTATION_PLAN.md` -> `PLAN.MD`) and confirmed active phase context remains Phase 6 / CP-06 pending interactive sign-off.  
+- Updated tab strip rendering to a cleaner compact dark style (rounded tabs/buttons, stronger active hierarchy, refined close/new/scroll visual treatment) with no tab-behavior changes.  
+- Upgraded nav toolbar button visuals to owner-draw compact glyph buttons (Back/Forward/Up/Refresh) using Segoe MDL2 glyphs and hover/pressed/disabled states; command wiring unchanged.  
+- Polished breadcrumb/address visuals into a cohesive dark control surface and removed bright edit-mode styling artifacts (theme-neutral edit control + dark colors/margins); path/flyout/edit behavior unchanged.  
+- Applied explicit dark custom-draw visuals for details header row (dark background, readable text, subtle separators) while preserving sort/column logic.  
+- Added subtle left inset for the main file list zone in `MainWindow` layout to improve breathing room without changing pane structure.  
+- Refined sidebar/search visual treatment (palette + rounded search/hover rows + subtle separators) and status bar integration styling while keeping right-pane interactions unchanged.  
+- Verified `Debug x64` full solution build succeeds (`FileExplorer.sln`).  
+- Verified tests run and pass (`x64\\Debug\\FileExplorer.Tests.exe`: 0 tests, 0 failures).  
+**Not completed / carried forward:**  
+- CP-06 remains pending final user interactive sign-off.  
+**Decisions made:** AD-034  
+**Errors encountered and resolved:**  
+- `LNK1104` on solution build due running `x64\\Debug\\FileExplorer.exe`; resolved by stopping the running process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-06 - Partial (verification pending)  
+**Next session should start with:**  
+- Run user visual verification for the polish pass (tabs/nav/path/header/list inset/sidebar/status) and either iterate visual tweaks or close CP-06 if accepted.
 
 ### Session 028 - 2026-04-18
 **Phase:** Phase 6 - Right Sidebar Shell  
@@ -1047,6 +1136,46 @@ Severity: Blocker | High | Low | Debt
 ---
 
 ## Test Results Log
+
+### Test Run 024 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 0  
+**Passed:** 0  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-typography consistency pass verification run)  
+**Failures:**  
+- None
+
+### Test Run 023 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 0  
+**Passed:** 0  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-strict visual correction pass verification run)  
+**Failures:**  
+- None
+
+### Test Run 022 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 0  
+**Passed:** 0  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (final visual-polish pass verification rerun)  
+**Failures:**  
+- None
+
+### Test Run 021 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 0  
+**Passed:** 0  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-visual-polish pass verification run)  
+**Failures:**  
+- None
 
 ### Test Run 020 - 2026-04-18
 **Configuration:** Debug x64  

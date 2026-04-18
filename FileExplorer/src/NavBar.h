@@ -6,7 +6,9 @@
 
 #include <Windows.h>
 
+#include <memory>
 #include <string>
+#include <type_traits>
 
 #include "BreadcrumbBar.h"
 
@@ -44,6 +46,12 @@ public:
     void Refresh();
 
 private:
+    struct FontDeleter {
+        void operator()(HFONT font) const noexcept;
+    };
+
+    using UniqueFont = std::unique_ptr<std::remove_pointer_t<HFONT>, FontDeleter>;
+
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
     LRESULT HandleMessage(UINT message, WPARAM w_param, LPARAM l_param);
 
@@ -51,6 +59,8 @@ private:
     bool CreateChildControls();
     void LayoutChildControls();
     void PostNavCommand(NavCommand command) const;
+    void EnsureGlyphFont();
+    bool DrawNavButton(const DRAWITEMSTRUCT* draw_item) const;
 
     HWND parent_hwnd_{nullptr};
     HWND hwnd_{nullptr};
@@ -63,7 +73,8 @@ private:
     UINT dpi_{96U};
 
     BreadcrumbBar breadcrumb_bar_{};
+    UniqueFont glyph_font_{nullptr};
+    int glyph_font_height_{0};
 };
 
 }  // namespace fileexplorer
-

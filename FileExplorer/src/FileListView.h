@@ -90,12 +90,14 @@ private:
     bool CreateListViewControl();
     void CreateColumns();
     void ApplyScaledColumns();
+    void ApplyHeaderVisualStyle();
     void EnsureSystemImageList();
     void EnsureDividerFont();
 
     bool HandleGetDispInfo(NMLVDISPINFOW* info) const;
     bool HandleColumnClick(int column_index);
     bool HandleCustomDraw(NMLVCUSTOMDRAW* custom_draw, LRESULT* result);
+    bool HandleHeaderCustomDraw(NMCUSTOMDRAW* custom_draw, LRESULT* result) const;
     bool HandleDoubleClick(const NMITEMACTIVATE* item_activate);
     bool HandleItemChanging(const NMLISTVIEW* list_view, LRESULT* result) const;
     bool HandleItemChanged(const NMLISTVIEW* list_view);

@@ -18,16 +18,43 @@ constexpr UINT kMenuCloseRight = 3003;
 constexpr UINT kMenuDuplicate = 3004;
 constexpr UINT kMenuPinToggle = 3005;
 
-constexpr COLORREF kStripBackground = RGB(0x2B, 0x2B, 0x2B);
-constexpr COLORREF kTabActive = RGB(0x2D, 0x2D, 0x2D);
-constexpr COLORREF kTabHover = RGB(0x38, 0x38, 0x38);
-constexpr COLORREF kTabInactive = RGB(0x27, 0x27, 0x27);
-constexpr COLORREF kTabBorder = RGB(0x4A, 0x4A, 0x4A);
-constexpr COLORREF kTextActive = RGB(0xF0, 0xF0, 0xF0);
-constexpr COLORREF kTextInactive = RGB(0xBB, 0xBB, 0xBB);
-constexpr COLORREF kTextMuted = RGB(0x95, 0x95, 0x95);
-constexpr COLORREF kButtonHover = RGB(0x45, 0x45, 0x45);
-constexpr COLORREF kButtonInactive = RGB(0x34, 0x34, 0x34);
+constexpr COLORREF kStripBackground = RGB(0x15, 0x19, 0x1F);
+constexpr COLORREF kStripBottomBorder = RGB(0x2D, 0x33, 0x3D);
+constexpr COLORREF kTabActive = RGB(0x2A, 0x31, 0x3A);
+constexpr COLORREF kTabHover = RGB(0x22, 0x28, 0x31);
+constexpr COLORREF kTabInactive = RGB(0x1C, 0x22, 0x2A);
+constexpr COLORREF kTabInactiveSeparator = RGB(0x2B, 0x32, 0x3B);
+constexpr COLORREF kTabActiveTopAccent = RGB(0x67, 0x78, 0x8A);
+constexpr COLORREF kTextActive = RGB(0xE8, 0xEE, 0xF6);
+constexpr COLORREF kTextInactive = RGB(0xBD, 0xC6, 0xD1);
+constexpr COLORREF kTextMuted = RGB(0x92, 0x9B, 0xA7);
+constexpr COLORREF kButtonHover = RGB(0x2C, 0x34, 0x3E);
+constexpr COLORREF kButtonInactive = RGB(0x21, 0x27, 0x30);
+constexpr COLORREF kButtonPressed = RGB(0x34, 0x3D, 0x49);
+constexpr COLORREF kButtonBorder = RGB(0x35, 0x3E, 0x49);
+constexpr COLORREF kButtonBorderMuted = RGB(0x28, 0x2F, 0x38);
+
+void FillRoundedRect(HDC hdc, const RECT& rect, COLORREF fill, COLORREF border, int radius) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    if (brush == nullptr || pen == nullptr) {
+        if (brush != nullptr) {
+            DeleteObject(brush);
+        }
+        if (pen != nullptr) {
+            DeleteObject(pen);
+        }
+        return;
+    }
+
+    HGDIOBJ old_brush = SelectObject(hdc, brush);
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
+}
 
 void LogLastError(const wchar_t* context) {
     const DWORD error_code = GetLastError();
@@ -253,17 +280,17 @@ void TabStrip::RebuildLayout(HDC hdc) {
     const auto& tabs = tab_manager_->tabs();
     const int tab_count = static_cast<int>(tabs.size());
 
-    const int margin = MulDiv(6, static_cast<int>(dpi_), 96);
-    const int tab_gap = MulDiv(4, static_cast<int>(dpi_), 96);
-    const int plus_width = MulDiv(26, static_cast<int>(dpi_), 96);
-    const int arrow_width = MulDiv(22, static_cast<int>(dpi_), 96);
-    const int tab_height = std::max(MulDiv(24, static_cast<int>(dpi_), 96), client_height - MulDiv(8, static_cast<int>(dpi_), 96));
+    const int margin = MulDiv(8, static_cast<int>(dpi_), 96);
+    const int tab_gap = MulDiv(2, static_cast<int>(dpi_), 96);
+    const int plus_width = MulDiv(28, static_cast<int>(dpi_), 96);
+    const int arrow_width = MulDiv(24, static_cast<int>(dpi_), 96);
+    const int tab_height = std::max(MulDiv(28, static_cast<int>(dpi_), 96), client_height - MulDiv(8, static_cast<int>(dpi_), 96));
     const int tab_top = std::max(0, (client_height - tab_height) / 2);
-    const int close_size = MulDiv(14, static_cast<int>(dpi_), 96);
-    const int pinned_min_width = MulDiv(90, static_cast<int>(dpi_), 96);
-    const int pinned_max_width = MulDiv(170, static_cast<int>(dpi_), 96);
-    const int tab_min_width = MulDiv(110, static_cast<int>(dpi_), 96);
-    const int tab_max_width = MulDiv(220, static_cast<int>(dpi_), 96);
+    const int close_size = MulDiv(12, static_cast<int>(dpi_), 96);
+    const int pinned_min_width = MulDiv(96, static_cast<int>(dpi_), 96);
+    const int pinned_max_width = MulDiv(180, static_cast<int>(dpi_), 96);
+    const int tab_min_width = MulDiv(120, static_cast<int>(dpi_), 96);
+    const int tab_max_width = MulDiv(230, static_cast<int>(dpi_), 96);
     const int pinned_prefix_width = MeasureTextWidth(hdc, L"[P] ");
 
     std::vector<int> tab_widths;
@@ -274,12 +301,12 @@ void TabStrip::RebuildLayout(HDC hdc) {
         if (tab.pinned) {
             const int text_width = MeasureTextWidth(hdc, tab.displayName);
             width = std::clamp(
-                pinned_prefix_width + text_width + MulDiv(20, static_cast<int>(dpi_), 96),
+                pinned_prefix_width + text_width + MulDiv(28, static_cast<int>(dpi_), 96),
                 pinned_min_width,
                 pinned_max_width);
         } else {
             const int text_width = MeasureTextWidth(hdc, tab.displayName);
-            width = std::clamp(text_width + MulDiv(40, static_cast<int>(dpi_), 96) + close_size, tab_min_width, tab_max_width);
+            width = std::clamp(text_width + MulDiv(36, static_cast<int>(dpi_), 96) + close_size, tab_min_width, tab_max_width);
         }
         tab_widths.push_back(width);
         total_tabs_width += width;
@@ -332,7 +359,7 @@ void TabStrip::RebuildLayout(HDC hdc) {
             visible.closeRect = MakeEmptyRect();
 
             if (!tabs[i].pinned) {
-                const int close_left = visible.tabRect.right - close_size - MulDiv(8, static_cast<int>(dpi_), 96);
+                const int close_left = visible.tabRect.right - close_size - MulDiv(10, static_cast<int>(dpi_), 96);
                 const int close_top = visible.tabRect.top + (tab_height - close_size) / 2;
                 visible.closeRect = {close_left, close_top, close_left + close_size, close_top + close_size};
             }
@@ -586,7 +613,16 @@ void TabStrip::DrawTabStrip(HDC hdc) {
         DeleteObject(background);
     }
 
-    const int requested_pixel_height = -MulDiv(12, static_cast<int>(dpi_), 72);
+    HPEN strip_border_pen = CreatePen(PS_SOLID, 1, kStripBottomBorder);
+    if (strip_border_pen != nullptr) {
+        HGDIOBJ old_pen = SelectObject(hdc, strip_border_pen);
+        MoveToEx(hdc, client_rect.left, client_rect.bottom - 1, nullptr);
+        LineTo(hdc, client_rect.right, client_rect.bottom - 1);
+        SelectObject(hdc, old_pen);
+        DeleteObject(strip_border_pen);
+    }
+
+    const int requested_pixel_height = -MulDiv(9, static_cast<int>(dpi_), 72);
     if (font_ == nullptr || font_pixel_height_ != requested_pixel_height) {
         font_.reset(CreateFontW(
             requested_pixel_height,
@@ -602,7 +638,7 @@ void TabStrip::DrawTabStrip(HDC hdc) {
             CLIP_DEFAULT_PRECIS,
             CLEARTYPE_QUALITY,
             DEFAULT_PITCH | FF_DONTCARE,
-            L"Segoe UI"));
+            L"Segoe UI Variable Text"));
         font_pixel_height_ = requested_pixel_height;
     }
 
@@ -615,32 +651,32 @@ void TabStrip::DrawTabStrip(HDC hdc) {
 
     SetBkMode(hdc, TRANSPARENT);
 
-    if (show_scroll_buttons_) {
-        const auto draw_scroll_button = [&](const RECT& rect, bool enabled, bool hovered, const wchar_t* symbol) {
-            COLORREF fill = enabled ? (hovered ? kButtonHover : kButtonInactive) : kTabInactive;
-            HBRUSH brush = CreateSolidBrush(fill);
-            if (brush != nullptr) {
-                FillRect(hdc, &rect, brush);
-                DeleteObject(brush);
-            }
-            FrameRect(hdc, &rect, reinterpret_cast<HBRUSH>(GetStockObject(DC_BRUSH)));
-            SetDCBrushColor(hdc, kTabBorder);
-            SetTextColor(hdc, enabled ? kTextActive : kTextMuted);
-            DrawTextW(hdc, symbol, -1, const_cast<RECT*>(&rect), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        };
+    const int corner_radius = MulDiv(7, static_cast<int>(dpi_), 96);
+    const auto draw_compact_button = [&](const RECT& rect, bool enabled, bool hovered, const wchar_t* symbol) {
+        const bool pressed = hovered && (GetKeyState(VK_LBUTTON) & 0x8000) != 0;
+        COLORREF fill = enabled ? (pressed ? kButtonPressed : (hovered ? kButtonHover : kButtonInactive)) : kButtonInactive;
+        COLORREF border = enabled ? kButtonBorder : kButtonBorderMuted;
+        FillRoundedRect(hdc, rect, fill, border, corner_radius);
+        SetTextColor(hdc, enabled ? kTextInactive : kTextMuted);
+        RECT text_rect = rect;
+        DrawTextW(hdc, symbol, -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+    };
 
-        draw_scroll_button(left_scroll_rect_, left_scroll_enabled_, hovered_left_scroll_, L"<");
-        draw_scroll_button(right_scroll_rect_, right_scroll_enabled_, hovered_right_scroll_, L">");
+    if (show_scroll_buttons_) {
+        draw_compact_button(left_scroll_rect_, left_scroll_enabled_, hovered_left_scroll_, L"\u2039");
+        draw_compact_button(right_scroll_rect_, right_scroll_enabled_, hovered_right_scroll_, L"\u203A");
     }
 
     const int active_index = tab_manager_ != nullptr ? tab_manager_->active_index() : -1;
-    const auto& tabs = tab_manager_ != nullptr ? tab_manager_->tabs() : std::vector<TabState>{};
+    const std::vector<TabState>* tabs = (tab_manager_ != nullptr) ? &tab_manager_->tabs() : nullptr;
 
     for (const auto& visible : visible_tabs_) {
         const bool is_active = visible.tabIndex == active_index;
         const bool is_hovered = visible.tabIndex == hovered_tab_index_;
         const bool show_close =
-            !tabs[visible.tabIndex].pinned && (is_active || is_hovered);
+            tabs != nullptr &&
+            !(*tabs)[visible.tabIndex].pinned &&
+            (is_active || is_hovered);
 
         COLORREF fill = kTabInactive;
         if (is_active) {
@@ -649,18 +685,51 @@ void TabStrip::DrawTabStrip(HDC hdc) {
             fill = kTabHover;
         }
 
-        HBRUSH brush = CreateSolidBrush(fill);
-        if (brush != nullptr) {
-            FillRect(hdc, &visible.tabRect, brush);
-            DeleteObject(brush);
+        FillRoundedRect(hdc, visible.tabRect, fill, fill, corner_radius);
+
+        if (!is_active) {
+            HPEN separator_pen = CreatePen(PS_SOLID, 1, kTabInactiveSeparator);
+            if (separator_pen != nullptr) {
+                HGDIOBJ old_pen = SelectObject(hdc, separator_pen);
+                MoveToEx(
+                    hdc,
+                    visible.tabRect.right - 1,
+                    visible.tabRect.top + MulDiv(6, static_cast<int>(dpi_), 96),
+                    nullptr);
+                LineTo(
+                    hdc,
+                    visible.tabRect.right - 1,
+                    visible.tabRect.bottom - MulDiv(6, static_cast<int>(dpi_), 96));
+                SelectObject(hdc, old_pen);
+                DeleteObject(separator_pen);
+            }
         }
 
-        SetDCPenColor(hdc, kTabBorder);
-        HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, GetStockObject(DC_PEN)));
-        HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
-        Rectangle(hdc, visible.tabRect.left, visible.tabRect.top, visible.tabRect.right, visible.tabRect.bottom);
-        SelectObject(hdc, old_brush);
-        SelectObject(hdc, old_pen);
+        if (is_active) {
+            HPEN highlight_pen = CreatePen(PS_SOLID, 1, kTabActiveTopAccent);
+            if (highlight_pen != nullptr) {
+                HGDIOBJ old_pen = SelectObject(hdc, highlight_pen);
+                MoveToEx(
+                    hdc,
+                    visible.tabRect.left + MulDiv(10, static_cast<int>(dpi_), 96),
+                    visible.tabRect.top + MulDiv(1, static_cast<int>(dpi_), 96),
+                    nullptr);
+                LineTo(
+                    hdc,
+                    visible.tabRect.right - MulDiv(10, static_cast<int>(dpi_), 96),
+                    visible.tabRect.top + MulDiv(1, static_cast<int>(dpi_), 96));
+                SelectObject(hdc, old_pen);
+                DeleteObject(highlight_pen);
+            }
+
+            RECT join_rect = visible.tabRect;
+            join_rect.top = join_rect.bottom - 1;
+            HBRUSH join_brush = CreateSolidBrush(fill);
+            if (join_brush != nullptr) {
+                FillRect(hdc, &join_rect, join_brush);
+                DeleteObject(join_brush);
+            }
+        }
 
         RECT text_rect = visible.tabRect;
         text_rect.left += MulDiv(10, static_cast<int>(dpi_), 96);
@@ -671,8 +740,8 @@ void TabStrip::DrawTabStrip(HDC hdc) {
         }
 
         SetTextColor(hdc, is_active ? kTextActive : kTextInactive);
-        if (tabs[visible.tabIndex].pinned) {
-            const std::wstring pinned_label = L"[P] " + tabs[visible.tabIndex].displayName;
+        if (tabs != nullptr && (*tabs)[visible.tabIndex].pinned) {
+            const std::wstring pinned_label = L"[P] " + (*tabs)[visible.tabIndex].displayName;
             DrawTextW(
                 hdc,
                 pinned_label.c_str(),
@@ -682,41 +751,34 @@ void TabStrip::DrawTabStrip(HDC hdc) {
         } else {
             DrawTextW(
                 hdc,
-                tabs[visible.tabIndex].displayName.c_str(),
+                (tabs != nullptr ? (*tabs)[visible.tabIndex].displayName.c_str() : L""),
                 -1,
                 &text_rect,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         }
 
         if (show_close && IsRectValid(visible.closeRect)) {
-            SetTextColor(
-                hdc,
-                hovered_close_tab_index_ == visible.tabIndex ? kTextActive : kTextMuted);
+            const bool close_hovered = hovered_close_tab_index_ == visible.tabIndex;
+            if (close_hovered) {
+                FillRoundedRect(
+                    hdc,
+                    visible.closeRect,
+                    kButtonHover,
+                    kButtonHover,
+                    MulDiv(4, static_cast<int>(dpi_), 96));
+            }
+            SetTextColor(hdc, close_hovered ? kTextActive : kTextMuted);
+            RECT close_rect = visible.closeRect;
             DrawTextW(
                 hdc,
-                L"x",
+                L"\u00D7",
                 -1,
-                const_cast<RECT*>(&visible.closeRect),
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                &close_rect,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
     }
 
-    {
-        const COLORREF fill = hovered_plus_button_ ? kButtonHover : kButtonInactive;
-        HBRUSH brush = CreateSolidBrush(fill);
-        if (brush != nullptr) {
-            FillRect(hdc, &plus_button_rect_, brush);
-            DeleteObject(brush);
-        }
-        SetDCPenColor(hdc, kTabBorder);
-        HPEN old_pen = static_cast<HPEN>(SelectObject(hdc, GetStockObject(DC_PEN)));
-        HBRUSH old_brush = static_cast<HBRUSH>(SelectObject(hdc, GetStockObject(NULL_BRUSH)));
-        Rectangle(hdc, plus_button_rect_.left, plus_button_rect_.top, plus_button_rect_.right, plus_button_rect_.bottom);
-        SelectObject(hdc, old_brush);
-        SelectObject(hdc, old_pen);
-        SetTextColor(hdc, kTextActive);
-        DrawTextW(hdc, L"+", -1, &plus_button_rect_, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
+    draw_compact_button(plus_button_rect_, true, hovered_plus_button_, L"+");
 
     if (previous_font != nullptr) {
         SelectObject(hdc, previous_font);

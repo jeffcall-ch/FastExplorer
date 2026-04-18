@@ -12,16 +12,16 @@ namespace {
 
 constexpr wchar_t kSidebarClassName[] = L"FE_Sidebar";
 
-constexpr COLORREF kSidebarBackgroundColor = RGB(0x21, 0x21, 0x21);
-constexpr COLORREF kSidebarBorderColor = RGB(0x33, 0x33, 0x33);
-constexpr COLORREF kSearchBackgroundColor = RGB(0x2A, 0x2A, 0x2A);
-constexpr COLORREF kSearchBorderColor = RGB(0x3A, 0x3A, 0x3A);
-constexpr COLORREF kSearchTextColor = RGB(0xA8, 0xA8, 0xA8);
-constexpr COLORREF kHeaderTextColor = RGB(0xD7, 0xD7, 0xD7);
-constexpr COLORREF kItemTextColor = RGB(0xE6, 0xE6, 0xE6);
-constexpr COLORREF kItemHoverColor = RGB(0x2A, 0x2A, 0x2A);
-constexpr COLORREF kItemActiveColor = RGB(0x30, 0x39, 0x34);
-constexpr COLORREF kActiveUnderlineColor = RGB(0x6F, 0xB2, 0x7C);
+constexpr COLORREF kSidebarBackgroundColor = RGB(0x1C, 0x22, 0x2A);
+constexpr COLORREF kSidebarBorderColor = RGB(0x2E, 0x37, 0x42);
+constexpr COLORREF kSidebarSectionSeparatorColor = RGB(0x32, 0x3A, 0x46);
+constexpr COLORREF kSectionHeaderSurface = RGB(0x20, 0x27, 0x31);
+constexpr COLORREF kSearchBackgroundColor = RGB(0x21, 0x28, 0x31);
+constexpr COLORREF kSearchBorderColor = RGB(0x39, 0x44, 0x50);
+constexpr COLORREF kSearchTextColor = RGB(0xA9, 0xB4, 0xC1);
+constexpr COLORREF kHeaderTextColor = RGB(0xD5, 0xDE, 0xE8);
+constexpr COLORREF kItemTextColor = RGB(0xE2, 0xE8, 0xF0);
+constexpr COLORREF kItemHoverColor = RGB(0x2A, 0x33, 0x3E);
 
 constexpr UINT kMenuRemove = 8101;
 constexpr UINT kMenuRename = 8102;
@@ -75,6 +75,28 @@ void ConfigureMenuForNotifications(HMENU menu) {
     if (!SetMenuInfo(menu, &menu_info)) {
         LogLastError(L"SetMenuInfo(Sidebar Flyout)");
     }
+}
+
+void FillRoundedRect(HDC hdc, const RECT& rect, COLORREF fill, COLORREF border, int radius) {
+    HBRUSH brush = CreateSolidBrush(fill);
+    HPEN pen = CreatePen(PS_SOLID, 1, border);
+    if (brush == nullptr || pen == nullptr) {
+        if (brush != nullptr) {
+            DeleteObject(brush);
+        }
+        if (pen != nullptr) {
+            DeleteObject(pen);
+        }
+        return;
+    }
+
+    HGDIOBJ old_brush = SelectObject(hdc, brush);
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+    RoundRect(hdc, rect.left, rect.top, rect.right, rect.bottom, radius, radius);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    DeleteObject(pen);
+    DeleteObject(brush);
 }
 
 }  // namespace
@@ -513,7 +535,7 @@ void Sidebar::EnsureFonts() {
 
     if (header_font_ == nullptr || header_font_height_ != desired_header) {
         LOGFONTW header_lf = base_font;
-        header_lf.lfWeight = FW_BOLD;
+        header_lf.lfWeight = FW_SEMIBOLD;
         header_font_.reset(CreateFontIndirectW(&header_lf));
         if (header_font_ == nullptr) {
             LogLastError(L"CreateFontIndirectW(SidebarHeader)");
@@ -586,21 +608,7 @@ void Sidebar::Paint(HDC hdc) {
         search_left + ScaleForDpi(40, dpi_),
         static_cast<int>(client_rect.right) - ScaleForDpi(12, dpi_));
 
-    HBRUSH search_brush = CreateSolidBrush(kSearchBackgroundColor);
-    if (search_brush != nullptr) {
-        FillRect(hdc, &layout.search_rect, search_brush);
-        DeleteObject(search_brush);
-    }
-
-    HPEN search_border = CreatePen(PS_SOLID, 1, kSearchBorderColor);
-    if (search_border != nullptr) {
-        HGDIOBJ old_pen = SelectObject(hdc, search_border);
-        HGDIOBJ old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        Rectangle(hdc, layout.search_rect.left, layout.search_rect.top, layout.search_rect.right, layout.search_rect.bottom);
-        SelectObject(hdc, old_brush);
-        SelectObject(hdc, old_pen);
-        DeleteObject(search_border);
-    }
+    FillRoundedRect(hdc, layout.search_rect, kSearchBackgroundColor, kSearchBorderColor, ScaleForDpi(6, dpi_));
 
     if (item_font_ != nullptr) {
         SelectObject(hdc, item_font_.get());
@@ -609,7 +617,7 @@ void Sidebar::Paint(HDC hdc) {
     SetTextColor(hdc, kSearchTextColor);
     RECT search_text_rect = layout.search_rect;
     search_text_rect.left += ScaleForDpi(10, dpi_);
-    DrawTextW(hdc, L"Search (Phase 7)", -1, &search_text_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
+    DrawTextW(hdc, L"Search", -1, &search_text_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
     if (layout.content_bottom <= layout.content_top) {
         return;
@@ -625,6 +633,13 @@ void Sidebar::Paint(HDC hdc) {
     flyout_header_rect.right = search_right;
     flyout_header_rect.top = layout.content_top + (layout.flyout_header_logical_top - scroll_offset_);
     flyout_header_rect.bottom = flyout_header_rect.top + ScaleForDpi(18, dpi_);
+    FillRoundedRect(
+        hdc,
+        flyout_header_rect,
+        kSectionHeaderSurface,
+        kSectionHeaderSurface,
+        ScaleForDpi(4, dpi_));
+    flyout_header_rect.left += ScaleForDpi(8, dpi_);
     DrawTextW(hdc, L"Flyout Favourites", -1, &flyout_header_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
     RECT favourites_header_rect = {};
@@ -632,6 +647,13 @@ void Sidebar::Paint(HDC hdc) {
     favourites_header_rect.right = search_right;
     favourites_header_rect.top = layout.content_top + (layout.favourites_header_logical_top - scroll_offset_);
     favourites_header_rect.bottom = favourites_header_rect.top + ScaleForDpi(18, dpi_);
+    FillRoundedRect(
+        hdc,
+        favourites_header_rect,
+        kSectionHeaderSurface,
+        kSectionHeaderSurface,
+        ScaleForDpi(4, dpi_));
+    favourites_header_rect.left += ScaleForDpi(8, dpi_);
     DrawTextW(hdc, L"Favourites", -1, &favourites_header_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
     const int item_left = ScaleForDpi(16, dpi_);
@@ -658,11 +680,7 @@ void Sidebar::Paint(HDC hdc) {
         const bool hovered = (hovered_section_ == section && hovered_index_ == index);
 
         if (hovered) {
-            HBRUSH row_brush = CreateSolidBrush(kItemHoverColor);
-            if (row_brush != nullptr) {
-                FillRect(hdc, &row_rect, row_brush);
-                DeleteObject(row_brush);
-            }
+            FillRoundedRect(hdc, row_rect, kItemHoverColor, kItemHoverColor, ScaleForDpi(6, dpi_));
         }
 
         RECT text_rect = row_rect;
@@ -705,7 +723,7 @@ void Sidebar::Paint(HDC hdc) {
 
     const int divider_y = layout.content_top + (layout.divider_logical_y - scroll_offset_);
     if (divider_y >= layout.content_top && divider_y <= layout.content_bottom) {
-        HPEN divider_pen = CreatePen(PS_SOLID, 1, kSidebarBorderColor);
+        HPEN divider_pen = CreatePen(PS_SOLID, 1, kSidebarSectionSeparatorColor);
         if (divider_pen != nullptr) {
             HGDIOBJ old_pen = SelectObject(hdc, divider_pen);
             MoveToEx(hdc, search_left, divider_y, nullptr);
@@ -721,11 +739,11 @@ Sidebar::LayoutInfo Sidebar::BuildLayout(const RECT& client_rect) const {
 
     const int outer_padding = ScaleForDpi(12, dpi_);
     const int search_height = ScaleForDpi(32, dpi_);
-    const int section_spacing = ScaleForDpi(6, dpi_);
-    const int header_height = ScaleForDpi(16, dpi_);
+    const int section_spacing = ScaleForDpi(8, dpi_);
+    const int header_height = ScaleForDpi(18, dpi_);
     const int row_height = (std::max)(ScaleForDpi(22, dpi_), MeasuredItemTextHeight() + ScaleForDpi(8, dpi_));
-    const int header_item_gap = ScaleForDpi(3, dpi_);
-    const int divider_margin = ScaleForDpi(5, dpi_);
+    const int header_item_gap = ScaleForDpi(4, dpi_);
+    const int divider_margin = ScaleForDpi(8, dpi_);
 
     layout.search_rect.left = outer_padding;
     layout.search_rect.right = (std::max)(layout.search_rect.left + ScaleForDpi(40, dpi_), client_rect.right - outer_padding);
