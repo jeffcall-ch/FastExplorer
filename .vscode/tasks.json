@@ -1,0 +1,41 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Build Debug x64",
+      "type": "shell",
+      "command": "msbuild",
+      "args": [
+        "FileExplorer.sln",
+        "/p:Configuration=Debug",
+        "/p:Platform=x64",
+        "/m"
+      ],
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Build Release x64",
+      "type": "shell",
+      "command": "msbuild",
+      "args": [
+        "FileExplorer.sln",
+        "/p:Configuration=Release",
+        "/p:Platform=x64",
+        "/m"
+      ],
+      "group": "build",
+      "problemMatcher": "$msCompile"
+    },
+    {
+      "label": "Run Tests",
+      "type": "shell",
+      "command": ".\\x64\\Debug\\FileExplorer.Tests.exe",
+      "group": "test",
+      "dependsOn": "Build Debug x64"
+    }
+  ]
+}

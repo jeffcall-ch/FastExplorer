@@ -39,3 +39,14 @@
 
 # debug information files
 *.dwo
+
+# FileExplorer build artifacts
+.vs/
+x64/
+Debug/
+Release/
+*.user
+*.suo
+*.VC.db
+*.opendb
+ipch/

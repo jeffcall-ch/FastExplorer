@@ -1,0 +1,104 @@
+#pragma once
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <Windows.h>
+
+#include <atomic>
+#include <memory>
+#include <string>
+#include <thread>
+#include <type_traits>
+
+#include "FileListView.h"
+#include "FolderWorker.h"
+#include "NavBar.h"
+#include "Sidebar.h"
+#include "TabManager.h"
+#include "TabStrip.h"
+#include "Theme.h"
+
+namespace fileexplorer {
+
+class MainWindow final {
+public:
+    MainWindow();
+    ~MainWindow();
+
+    MainWindow(const MainWindow&) = delete;
+    MainWindow& operator=(const MainWindow&) = delete;
+
+    bool Create(HINSTANCE instance, int show_command);
+    int MessageLoop();
+
+private:
+    struct BrushDeleter {
+        void operator()(HBRUSH brush) const noexcept;
+    };
+
+    using UniqueBrush = std::unique_ptr<std::remove_pointer_t<HBRUSH>, BrushDeleter>;
+
+    static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
+    LRESULT HandleMessage(UINT message, WPARAM w_param, LPARAM l_param);
+
+    bool RegisterWindowClass();
+    bool CreateMainWindow(int show_command);
+    bool InitializeChildZones();
+    void CreateZoneBrushes();
+    void DestroyZoneBrushes();
+    void ApplyWindowChrome();
+    void RecalculateLayout();
+    void LayoutChildZones();
+    void OnDpiChanged(UINT new_dpi, RECT* suggested_rect);
+    void PaintFallbackBackground(HDC hdc);
+    void UpdateWindowTitle();
+    void HandleTabStateChanged();
+    void StartFolderLoad(
+        const std::wstring& path,
+        bool incremental_refresh,
+        const std::wstring& post_load_select_name = L"");
+    void PreparePostLoadSelectionForTransition(const std::wstring& from_path, const std::wstring& to_path);
+    void StartDebouncedRefreshForActiveFolder(uint64_t watch_generation);
+    void RestartFolderWatcher(const std::wstring& path);
+    void StopFolderWatcher();
+    bool HandleTabKeyboardShortcut(WPARAM key_code, bool ctrl_down, bool shift_down);
+
+    HINSTANCE instance_{nullptr};
+    HWND hwnd_{nullptr};
+    HWND tab_strip_hwnd_{nullptr};
+    HWND nav_bar_hwnd_{nullptr};
+    HWND file_list_hwnd_{nullptr};
+    HWND sidebar_hwnd_{nullptr};
+    HWND status_bar_hwnd_{nullptr};
+
+    UINT dpi_{96U};
+    LayoutMetrics metrics_{};
+
+    bool use_solid_fallback_background_{true};
+
+    TabManager tab_manager_{};
+    TabStrip tab_strip_{};
+    NavBar nav_bar_{};
+    FileListView file_list_view_{};
+    Sidebar sidebar_{};
+
+    std::shared_ptr<std::atomic<uint64_t>> folder_generation_source_{};
+    bool pending_incremental_refresh_{false};
+
+    std::thread folder_watch_thread_{};
+    std::shared_ptr<std::atomic<bool>> folder_watch_stop_{};
+    std::atomic<uint64_t> folder_watch_generation_{0};
+    std::wstring watched_folder_path_{};
+    bool pending_debounced_refresh_{false};
+    uint64_t pending_debounced_refresh_generation_{0};
+    std::wstring pending_post_load_selection_name_{};
+
+    UniqueBrush nav_brush_{nullptr};
+    UniqueBrush file_list_brush_{nullptr};
+    UniqueBrush sidebar_brush_{nullptr};
+    UniqueBrush status_brush_{nullptr};
+};
+
+}  // namespace fileexplorer

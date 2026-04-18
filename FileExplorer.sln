@@ -1,0 +1,33 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FileExplorer", "FileExplorer\FileExplorer.vcxproj", "{1B7CC6FC-5D1F-4A39-9E23-8FE0A7D83137}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FileExplorer.Core", "FileExplorer.Core\FileExplorer.Core.vcxproj", "{E8F9E0CB-89A3-4DAA-9599-E5A6672F0ED2}"
+EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "FileExplorer.Tests", "FileExplorer.Tests\FileExplorer.Tests.vcxproj", "{C59DFCC7-79F7-49B0-AE27-CC4E9DE348AF}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|x64 = Debug|x64
+		Release|x64 = Release|x64
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{1B7CC6FC-5D1F-4A39-9E23-8FE0A7D83137}.Debug|x64.ActiveCfg = Debug|x64
+		{1B7CC6FC-5D1F-4A39-9E23-8FE0A7D83137}.Debug|x64.Build.0 = Debug|x64
+		{1B7CC6FC-5D1F-4A39-9E23-8FE0A7D83137}.Release|x64.ActiveCfg = Release|x64
+		{1B7CC6FC-5D1F-4A39-9E23-8FE0A7D83137}.Release|x64.Build.0 = Release|x64
+		{E8F9E0CB-89A3-4DAA-9599-E5A6672F0ED2}.Debug|x64.ActiveCfg = Debug|x64
+		{E8F9E0CB-89A3-4DAA-9599-E5A6672F0ED2}.Debug|x64.Build.0 = Debug|x64
+		{E8F9E0CB-89A3-4DAA-9599-E5A6672F0ED2}.Release|x64.ActiveCfg = Release|x64
+		{E8F9E0CB-89A3-4DAA-9599-E5A6672F0ED2}.Release|x64.Build.0 = Release|x64
+		{C59DFCC7-79F7-49B0-AE27-CC4E9DE348AF}.Debug|x64.ActiveCfg = Debug|x64
+		{C59DFCC7-79F7-49B0-AE27-CC4E9DE348AF}.Debug|x64.Build.0 = Debug|x64
+		{C59DFCC7-79F7-49B0-AE27-CC4E9DE348AF}.Release|x64.ActiveCfg = Release|x64
+		{C59DFCC7-79F7-49B0-AE27-CC4E9DE348AF}.Release|x64.Build.0 = Release|x64
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+EndGlobal

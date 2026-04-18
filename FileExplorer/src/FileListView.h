@@ -1,0 +1,174 @@
+#pragma once
+
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
+#include <Windows.h>
+#include <CommCtrl.h>
+
+#include <memory>
+#include <string>
+#include <type_traits>
+#include <vector>
+
+namespace fileexplorer {
+
+constexpr UINT WM_FE_FILELIST_NAVIGATE = WM_APP + 103;
+constexpr UINT WM_FE_FILELIST_STATUS_UPDATE = WM_APP + 104;
+constexpr UINT WM_FE_FILELIST_REFRESH = WM_APP + 105;
+
+enum class SortColumn {
+    Name = 0,
+    Extension = 1,
+    DateModified = 2,
+    Size = 3,
+};
+
+enum class SortDirection {
+    Ascending,
+    Descending,
+};
+
+struct FileEntry {
+    std::wstring name;
+    std::wstring extension;
+    FILETIME modified_time{};
+    ULONGLONG size_bytes = 0;
+    DWORD attributes = 0;
+    bool is_folder = false;
+    int icon_index = 0;
+
+    bool is_group_divider = false;
+    std::wstring group_label;
+};
+
+class FileListView final {
+public:
+    FileListView();
+    ~FileListView();
+
+    FileListView(const FileListView&) = delete;
+    FileListView& operator=(const FileListView&) = delete;
+
+    bool Create(HWND parent, HINSTANCE instance, int control_id);
+    HWND hwnd() const noexcept;
+    void SetDpi(UINT dpi);
+    void SetPostLoadSelectionName(std::wstring name);
+
+    void BeginFolderLoad(const std::wstring& path, bool incremental_refresh);
+    void ApplyLoadedFolderEntries(std::vector<FileEntry> entries, bool incremental_refresh);
+
+    bool LoadFolder(const std::wstring& path);
+    const std::wstring& current_path() const noexcept;
+
+    bool HandleNotify(LPARAM l_param, LRESULT* result);
+
+private:
+    enum class DateBucket {
+        Today,
+        Yesterday,
+        ThisWeek,
+        ThisMonth,
+        Older,
+    };
+
+    struct FontDeleter {
+        void operator()(HFONT font) const noexcept;
+    };
+
+    using UniqueFont = std::unique_ptr<std::remove_pointer_t<HFONT>, FontDeleter>;
+
+    static LRESULT CALLBACK ListViewSubclassProc(
+        HWND hwnd,
+        UINT message,
+        WPARAM w_param,
+        LPARAM l_param,
+        UINT_PTR subclass_id,
+        DWORD_PTR ref_data);
+
+    bool CreateListViewControl();
+    void CreateColumns();
+    void ApplyScaledColumns();
+    void EnsureSystemImageList();
+    void EnsureDividerFont();
+
+    bool HandleGetDispInfo(NMLVDISPINFOW* info) const;
+    bool HandleColumnClick(int column_index);
+    bool HandleCustomDraw(NMLVCUSTOMDRAW* custom_draw, LRESULT* result);
+    bool HandleDoubleClick(const NMITEMACTIVATE* item_activate);
+    bool HandleItemChanging(const NMLISTVIEW* list_view, LRESULT* result) const;
+    bool HandleItemChanged(const NMLISTVIEW* list_view);
+    bool HandleClick(const NMITEMACTIVATE* item_activate);
+
+    LRESULT HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM l_param);
+
+    void SortBaseEntries();
+    void BuildDisplayEntriesWithGroups();
+    void UpdateSortIndicators();
+    void UpdateItemCountAndRefresh(bool set_default_focus);
+    void PostStatusUpdate() const;
+    std::wstring BuildStatusText() const;
+    void SetLoadingState(bool loading);
+    void DrawLoadingOverlay(HDC hdc) const;
+    void CaptureViewState(std::vector<std::wstring>* selected_names, std::wstring* focused_name, int* top_index) const;
+    void RestoreViewState(const std::vector<std::wstring>& selected_names, const std::wstring& focused_name, int top_index);
+    void ApplyRefreshDelta(std::vector<FileEntry> incoming_entries);
+
+    void ClearSelection();
+    void SanitizeSelectionAndFocus();
+    bool NavigateToParentFolder();
+    bool HandleTypeAheadChar(wchar_t character);
+    bool SelectByPrefix(const std::wstring& prefix);
+    int FindNextSelectableIndex(int start_index, int step) const;
+    bool IsSelectableIndex(int index) const;
+    bool IsDividerIndex(int index) const;
+    int FindSelectableIndexByName(const std::wstring& name) const;
+    bool SelectSingleEntryByName(const std::wstring& name);
+    int SelectedCountExcludingDividers() const;
+    int FocusedIndex() const;
+    bool OpenEntryAtIndex(int index, bool open_files_too);
+    void ShowContextMenu(POINT screen_point, int hit_index);
+    void DrawEmptyState(HDC hdc) const;
+
+    std::wstring BuildFullPath(const FileEntry& entry) const;
+    static std::wstring NormalizePath(std::wstring path);
+    static std::wstring ParentPath(const std::wstring& path);
+    static std::wstring EntryKey(const FileEntry& entry);
+    static bool EntriesEquivalent(const FileEntry& left, const FileEntry& right);
+    static std::wstring GetExtensionFromName(const std::wstring& name);
+    static int CompareTextInsensitive(const std::wstring& left, const std::wstring& right);
+    static std::wstring FormatDateTime(const FILETIME& file_time);
+    static std::wstring FormatFileSize(ULONGLONG size_bytes);
+    static int ResolveIconIndex(const std::wstring& full_path, bool is_folder);
+    static COLORREF ColorForExtension(const std::wstring& extension, bool is_folder);
+    static DateBucket BucketForFileTime(const FILETIME& file_time);
+    static const wchar_t* LabelForBucket(DateBucket bucket);
+
+    HWND parent_hwnd_{nullptr};
+    HWND hwnd_{nullptr};
+    HINSTANCE instance_{nullptr};
+    int control_id_{0};
+    UINT dpi_{96U};
+    HIMAGELIST system_image_list_{nullptr};
+
+    std::wstring current_path_{};
+    std::vector<FileEntry> base_entries_{};
+    std::vector<FileEntry> display_entries_{};
+
+    SortColumn sort_column_{SortColumn::Name};
+    SortDirection sort_direction_{SortDirection::Ascending};
+
+    UniqueFont divider_font_{nullptr};
+    int divider_font_height_{0};
+
+    std::wstring type_ahead_buffer_{};
+    DWORD type_ahead_last_tick_{0};
+    bool sanitizing_selection_{false};
+    bool loading_{false};
+    bool pending_incremental_refresh_{false};
+    int loading_frame_{0};
+    std::wstring post_load_selection_name_{};
+};
+
+}  // namespace fileexplorer
