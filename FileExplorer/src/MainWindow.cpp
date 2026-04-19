@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "WorkerMessages.h"
+#include "SearchWorker.h"
 
 namespace {
 
@@ -155,9 +156,11 @@ void MainWindow::BrushDeleter::operator()(HBRUSH brush) const noexcept {
 
 MainWindow::MainWindow()
     : metrics_(DefaultLayoutMetrics()),
-      folder_generation_source_(std::make_shared<std::atomic<uint64_t>>(0)) {}
+      folder_generation_source_(std::make_shared<std::atomic<uint64_t>>(0)),
+      search_generation_source_(std::make_shared<std::atomic<uint64_t>>(0)) {}
 
 MainWindow::~MainWindow() {
+    CancelSearchWorker();
     StopFolderWatcher();
     DestroyZoneBrushes();
 }
@@ -466,6 +469,58 @@ void MainWindow::PaintFallbackBackground(HDC hdc) {
     }
 }
 
+void MainWindow::PaintFileListInsetGutter(HDC hdc) {
+    if (hdc == nullptr || hwnd_ == nullptr) {
+        return;
+    }
+
+    RECT client_rect = {};
+    if (!GetClientRect(hwnd_, &client_rect)) {
+        LogLastError(L"GetClientRect(PaintFileListInsetGutter)");
+        return;
+    }
+
+    const int client_width = std::max(0, static_cast<int>(client_rect.right - client_rect.left));
+    const int client_height = std::max(0, static_cast<int>(client_rect.bottom - client_rect.top));
+
+    const int tab_height = std::min(metrics_.tabStripHeight, client_height);
+    const int nav_height = std::min(metrics_.navBarHeight, std::max(0, client_height - tab_height));
+    const int status_height =
+        std::min(metrics_.statusBarHeight, std::max(0, client_height - tab_height - nav_height));
+    const int content_top = tab_height + nav_height;
+    const int content_bottom = client_height - status_height;
+
+    const int sidebar_width = std::min(metrics_.sidebarWidth, client_width);
+    const int file_list_width = std::max(0, client_width - sidebar_width);
+    const int list_left_inset = MulDiv(10, static_cast<int>(dpi_), 96);
+    const int file_list_x = (std::min)(list_left_inset, file_list_width);
+
+    if (file_list_x <= 0 || content_bottom <= content_top) {
+        return;
+    }
+
+    RECT gutter_rect = {};
+    gutter_rect.left = 0;
+    gutter_rect.right = file_list_x;
+    gutter_rect.top = content_top;
+    gutter_rect.bottom = content_bottom;
+
+    HBRUSH brush = file_list_brush_.get();
+    HBRUSH transient_brush = nullptr;
+    if (brush == nullptr) {
+        transient_brush = CreateSolidBrush(kFileListColor);
+        brush = transient_brush;
+    }
+
+    if (brush != nullptr) {
+        FillRect(hdc, &gutter_rect, brush);
+    }
+
+    if (transient_brush != nullptr) {
+        DeleteObject(transient_brush);
+    }
+}
+
 void MainWindow::UpdateWindowTitle() {
     std::wstring title = kInitialWindowTitle;
     if (const TabState* active = tab_manager_.active_tab(); active != nullptr && !active->displayName.empty()) {
@@ -478,15 +533,32 @@ void MainWindow::UpdateWindowTitle() {
 }
 
 void MainWindow::HandleTabStateChanged() {
+    PruneSearchSnapshots();
     tab_strip_.Refresh();
 
-    if (const TabState* active = tab_manager_.active_tab(); active != nullptr) {
+    const TabState* active = tab_manager_.active_tab();
+    const uint64_t active_tab_id = (active != nullptr) ? active->id : 0;
+    const bool tab_switched = last_active_tab_id_ != 0 && last_active_tab_id_ != active_tab_id;
+    if (tab_switched) {
+        StoreSearchSnapshotForTab(last_active_tab_id_);
+    }
+
+    if (active != nullptr) {
         nav_bar_.SetPath(active->path);
         sidebar_.SetCurrentPath(active->path);
-        const std::wstring post_load_selection_name = std::move(pending_post_load_selection_name_);
-        pending_post_load_selection_name_.clear();
-        StartFolderLoad(active->path, false, post_load_selection_name);
-        RestartFolderWatcher(active->path);
+
+        const auto snapshot_it = search_snapshots_.find(active->id);
+        if (tab_switched && snapshot_it != search_snapshots_.end()) {
+            CancelSearchWorker();
+            file_list_view_.RestoreSearchSnapshot(snapshot_it->second);
+            pending_post_load_selection_name_.clear();
+            StopFolderWatcher();
+        } else {
+            const std::wstring post_load_selection_name = std::move(pending_post_load_selection_name_);
+            pending_post_load_selection_name_.clear();
+            StartFolderLoad(active->path, false, post_load_selection_name);
+            RestartFolderWatcher(active->path);
+        }
     } else {
         sidebar_.SetCurrentPath(L"");
         pending_post_load_selection_name_.clear();
@@ -498,12 +570,15 @@ void MainWindow::HandleTabStateChanged() {
         tab_manager_.CanNavigateUp());
 
     UpdateWindowTitle();
+    last_active_tab_id_ = active_tab_id;
 }
 
 void MainWindow::StartFolderLoad(
     const std::wstring& path,
     bool incremental_refresh,
     const std::wstring& post_load_select_name) {
+    ExitSearchModeUi(true);
+
     if (folder_generation_source_ == nullptr) {
         folder_generation_source_ = std::make_shared<std::atomic<uint64_t>>(0);
     }
@@ -524,6 +599,126 @@ void MainWindow::StartFolderLoad(
     request.hwnd_target = hwnd_;
     request.generation_source = folder_generation_source_;
     FolderWorker::Start(std::move(request));
+}
+
+void MainWindow::StartSearch(const std::wstring& pattern) {
+    const TabState* active = tab_manager_.active_tab();
+    if (active == nullptr) {
+        return;
+    }
+
+    const std::wstring root_path = NormalizePath(active->path);
+    if (root_path.empty()) {
+        return;
+    }
+
+    if (search_generation_source_ == nullptr) {
+        search_generation_source_ = std::make_shared<std::atomic<uint64_t>>(0);
+    }
+
+    RemoveSearchSnapshotForTab(active->id);
+    CancelSearchWorker();
+
+    search_cancel_token_ = std::make_shared<std::atomic<bool>>(false);
+    search_active_ = true;
+    search_root_path_ = root_path;
+    search_pattern_ = pattern.empty() ? L"*" : pattern;
+    search_started_tick_ms_ = GetTickCount64();
+
+    StopFolderWatcher();
+    file_list_view_.BeginSearch(search_root_path_, search_pattern_);
+
+    const uint64_t generation = ++(*search_generation_source_);
+    SearchWorker::Request request = {};
+    request.root_path = search_root_path_;
+    request.pattern = search_pattern_;
+    request.generation = generation;
+    request.hwnd_target = hwnd_;
+    request.generation_source = search_generation_source_;
+    request.cancel_token = search_cancel_token_;
+    SearchWorker::Start(std::move(request));
+}
+
+void MainWindow::CancelSearchWorker() {
+    if (search_cancel_token_ != nullptr) {
+        search_cancel_token_->store(true, std::memory_order_release);
+        search_cancel_token_.reset();
+    }
+
+    if (search_generation_source_ == nullptr) {
+        search_generation_source_ = std::make_shared<std::atomic<uint64_t>>(0);
+    }
+    ++(*search_generation_source_);
+    search_active_ = false;
+    search_started_tick_ms_ = 0;
+}
+
+void MainWindow::ExitSearchModeUi(bool clear_sidebar_text) {
+    const bool was_search_mode = file_list_view_.IsSearchMode() || search_active_;
+    if (!was_search_mode) {
+        return;
+    }
+
+    CancelSearchWorker();
+    file_list_view_.LeaveSearchMode();
+    search_root_path_.clear();
+    search_pattern_.clear();
+    search_started_tick_ms_ = 0;
+    if (const TabState* active = tab_manager_.active_tab(); active != nullptr) {
+        RemoveSearchSnapshotForTab(active->id);
+    }
+    if (clear_sidebar_text) {
+        sidebar_.ClearSearchText(false);
+    }
+}
+
+void MainWindow::StoreSearchSnapshotForTab(uint64_t tab_id) {
+    if (tab_id == 0) {
+        return;
+    }
+
+    const auto& tabs = tab_manager_.tabs();
+    const bool tab_exists = std::any_of(
+        tabs.begin(),
+        tabs.end(),
+        [tab_id](const TabState& tab) { return tab.id == tab_id; });
+    if (!tab_exists) {
+        return;
+    }
+
+    FileListView::SearchSnapshot snapshot = {};
+    if (file_list_view_.CaptureSearchSnapshot(&snapshot)) {
+        search_snapshots_[tab_id] = std::move(snapshot);
+    } else {
+        search_snapshots_.erase(tab_id);
+    }
+}
+
+void MainWindow::RemoveSearchSnapshotForTab(uint64_t tab_id) {
+    if (tab_id == 0) {
+        return;
+    }
+    search_snapshots_.erase(tab_id);
+}
+
+void MainWindow::PruneSearchSnapshots() {
+    if (search_snapshots_.empty()) {
+        return;
+    }
+
+    std::unordered_set<uint64_t> live_tab_ids;
+    live_tab_ids.reserve(tab_manager_.tabs().size());
+    for (const TabState& tab : tab_manager_.tabs()) {
+        live_tab_ids.insert(tab.id);
+    }
+
+    for (auto it = search_snapshots_.begin(); it != search_snapshots_.end();) {
+        if (!live_tab_ids.contains(it->first)) {
+            it = search_snapshots_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void MainWindow::PreparePostLoadSelectionForTransition(
@@ -676,9 +871,7 @@ bool MainWindow::HandleTabKeyboardShortcut(WPARAM key_code, bool ctrl_down, bool
         break;
 
     case 'F':
-        if (sidebar_hwnd_ != nullptr) {
-            SetFocus(sidebar_hwnd_);
-        }
+        sidebar_.FocusSearch();
         break;
 
     default:
@@ -875,6 +1068,28 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         return 0;
     }
 
+    case WM_FE_SIDEBAR_SEARCH_REQUEST: {
+        auto search_pattern = std::unique_ptr<std::wstring>(reinterpret_cast<std::wstring*>(l_param));
+        if (search_pattern != nullptr) {
+            StartSearch(*search_pattern);
+        }
+        return 0;
+    }
+
+    case WM_FE_SIDEBAR_SEARCH_CLEAR:
+        if (file_list_view_.IsSearchMode() || search_active_) {
+            ExitSearchModeUi(false);
+            if (const TabState* active = tab_manager_.active_tab(); active != nullptr) {
+                StartFolderLoad(active->path, false);
+                RestartFolderWatcher(active->path);
+            }
+            nav_bar_.SetNavigationState(
+                tab_manager_.CanNavigateBack(),
+                tab_manager_.CanNavigateForward(),
+                tab_manager_.CanNavigateUp());
+        }
+        return 0;
+
     case WM_FE_FILELIST_NAVIGATE: {
         const std::wstring previous_path =
             (tab_manager_.active_tab() != nullptr) ? tab_manager_.active_tab()->path : L"";
@@ -884,6 +1099,39 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
                 PreparePostLoadSelectionForTransition(previous_path, active->path);
             }
             HandleTabStateChanged();
+        }
+        return 0;
+    }
+
+    case WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB: {
+        auto requested_path = std::unique_ptr<std::wstring>(reinterpret_cast<std::wstring*>(l_param));
+        if (requested_path) {
+            const std::wstring target_path = NormalizePath(*requested_path);
+            if (!target_path.empty()) {
+                if (const TabState* active = tab_manager_.active_tab(); active != nullptr) {
+                    StoreSearchSnapshotForTab(active->id);
+                }
+
+                if (tab_manager_.AddTab(target_path, true, false) >= 0) {
+                    HandleTabStateChanged();
+                }
+            }
+        }
+        return 0;
+    }
+
+    case WM_FE_FILELIST_ADD_REGULAR_FAVOURITE: {
+        auto requested_path = std::unique_ptr<std::wstring>(reinterpret_cast<std::wstring*>(l_param));
+        if (requested_path) {
+            sidebar_.AddRegularFavourite(*requested_path);
+        }
+        return 0;
+    }
+
+    case WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE: {
+        auto requested_path = std::unique_ptr<std::wstring>(reinterpret_cast<std::wstring*>(l_param));
+        if (requested_path) {
+            sidebar_.AddFlyoutFavourite(*requested_path);
         }
         return 0;
     }
@@ -979,7 +1227,45 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         return 0;
     }
 
+    case WM_FE_SEARCH_RESULT: {
+        auto result_entries = std::unique_ptr<std::vector<FileEntry>>(reinterpret_cast<std::vector<FileEntry>*>(l_param));
+        if (!result_entries || search_generation_source_ == nullptr) {
+            return 0;
+        }
+
+        const uint64_t generation = static_cast<uint64_t>(w_param);
+        if (generation != search_generation_source_->load(std::memory_order_acquire)) {
+            return 0;
+        }
+
+        file_list_view_.AppendSearchResults(std::move(*result_entries));
+        return 0;
+    }
+
+    case WM_FE_SEARCH_DONE:
+        if (search_generation_source_ == nullptr) {
+            return 0;
+        }
+
+        if (static_cast<uint64_t>(w_param) != search_generation_source_->load(std::memory_order_acquire)) {
+            return 0;
+        }
+
+        search_active_ = false;
+        search_cancel_token_.reset();
+        if (search_started_tick_ms_ != 0) {
+            const ULONGLONG elapsed = GetTickCount64() - search_started_tick_ms_;
+            file_list_view_.SetSearchElapsedMs(elapsed);
+        }
+        search_started_tick_ms_ = 0;
+        file_list_view_.CompleteSearch();
+        return 0;
+
     case WM_FE_ACTIVE_FOLDER_DIRTY: {
+        if (file_list_view_.IsSearchMode()) {
+            return 0;
+        }
+
         const uint64_t watch_generation = static_cast<uint64_t>(w_param);
         if (watch_generation != folder_watch_generation_.load(std::memory_order_acquire)) {
             return 0;
@@ -1017,9 +1303,21 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
     case WM_ERASEBKGND:
         if (use_solid_fallback_background_) {
             PaintFallbackBackground(reinterpret_cast<HDC>(w_param));
+            PaintFileListInsetGutter(reinterpret_cast<HDC>(w_param));
             return 1;
         }
-        break;
+        PaintFileListInsetGutter(reinterpret_cast<HDC>(w_param));
+        return 1;
+
+    case WM_PAINT: {
+        PAINTSTRUCT paint_struct = {};
+        HDC hdc = BeginPaint(hwnd_, &paint_struct);
+        if (hdc != nullptr) {
+            PaintFileListInsetGutter(hdc);
+        }
+        EndPaint(hwnd_, &paint_struct);
+        return 0;
+    }
 
     case WM_CTLCOLORSTATIC: {
         const HDC hdc = reinterpret_cast<HDC>(w_param);
@@ -1061,6 +1359,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         KillTimer(hwnd_, kFolderRefreshDebounceTimerId);
         pending_debounced_refresh_ = false;
         pending_debounced_refresh_generation_ = 0;
+        CancelSearchWorker();
         StopFolderWatcher();
         PostQuitMessage(0);
         return 0;

@@ -1,12 +1,17 @@
 #include "Sidebar.h"
 
+#include <CommCtrl.h>
 #include <Shellapi.h>
 #include <Windowsx.h>
 #include <strsafe.h>
+#include <uxtheme.h>
 
 #include <algorithm>
 #include <cwchar>
 #include <cwctype>
+#include <thread>
+#include <utility>
+#include <vector>
 
 namespace {
 
@@ -15,7 +20,6 @@ constexpr wchar_t kSidebarClassName[] = L"FE_Sidebar";
 constexpr COLORREF kSidebarBackgroundColor = RGB(0x1C, 0x22, 0x2A);
 constexpr COLORREF kSidebarBorderColor = RGB(0x2E, 0x37, 0x42);
 constexpr COLORREF kSidebarSectionSeparatorColor = RGB(0x32, 0x3A, 0x46);
-constexpr COLORREF kSectionHeaderSurface = RGB(0x20, 0x27, 0x31);
 constexpr COLORREF kSearchBackgroundColor = RGB(0x21, 0x28, 0x31);
 constexpr COLORREF kSearchBorderColor = RGB(0x39, 0x44, 0x50);
 constexpr COLORREF kSearchTextColor = RGB(0xA9, 0xB4, 0xC1);
@@ -27,6 +31,9 @@ constexpr UINT kMenuRemove = 8101;
 constexpr UINT kMenuRename = 8102;
 constexpr UINT kFlyoutMenuFirstCommand = 8200;
 constexpr UINT kFlyoutMenuLastCommand = 0xEFFF;
+constexpr UINT_PTR kSearchEditSubclassId = 2;
+constexpr UINT_PTR kRenameEditSubclassId = 3;
+constexpr UINT kSidebarMessageFlyoutLoaded = WM_APP + 201;
 
 #ifndef MNS_NOTIFYBYPOS
 #define MNS_NOTIFYBYPOS 0x08000000
@@ -41,6 +48,16 @@ void LogLastError(const wchar_t* context) {
 
 int ScaleForDpi(int value, UINT dpi) {
     return MulDiv(value, static_cast<int>(dpi), 96);
+}
+
+std::wstring TrimWhitespace(std::wstring text) {
+    const auto not_space = [](wchar_t ch) { return !iswspace(ch); };
+    const auto begin = std::find_if(text.begin(), text.end(), not_space);
+    if (begin == text.end()) {
+        return L"";
+    }
+    const auto reverse_begin = std::find_if(text.rbegin(), text.rend(), not_space).base();
+    return std::wstring(begin, reverse_begin);
 }
 
 bool QueryMessageFont(LOGFONTW* out_font) {
@@ -111,6 +128,12 @@ void Sidebar::FontDeleter::operator()(HFONT font) const noexcept {
     }
 }
 
+void Sidebar::BrushDeleter::operator()(HBRUSH brush) const noexcept {
+    if (brush != nullptr) {
+        DeleteObject(brush);
+    }
+}
+
 Sidebar::Sidebar() = default;
 
 Sidebar::~Sidebar() = default;
@@ -144,6 +167,9 @@ bool Sidebar::Create(HWND parent, HINSTANCE instance, int control_id) {
 
     BuildDefaultItems();
     EnsureFonts();
+    if (!CreateSearchEditControl()) {
+        return false;
+    }
     UpdateScrollInfo();
     return true;
 }
@@ -168,6 +194,48 @@ void Sidebar::SetCurrentPath(const std::wstring& path) {
     InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
+void Sidebar::FocusSearch() {
+    if (search_edit_hwnd_ == nullptr) {
+        return;
+    }
+
+    SetFocus(search_edit_hwnd_);
+    SendMessageW(search_edit_hwnd_, EM_SETSEL, 0, -1);
+}
+
+void Sidebar::ClearSearchText(bool notify_parent) {
+    if (search_edit_hwnd_ != nullptr) {
+        SetWindowTextW(search_edit_hwnd_, L"");
+    }
+
+    if (notify_parent) {
+        DispatchSearchClear();
+    }
+
+    UpdateScrollInfo();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool Sidebar::AddRegularFavourite(const std::wstring& path) {
+    if (!favourites_store_.AddRegular(path)) {
+        return false;
+    }
+    RefreshItemsFromStore();
+    UpdateScrollInfo();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
+}
+
+bool Sidebar::AddFlyoutFavourite(const std::wstring& path) {
+    if (!favourites_store_.AddFlyout(path)) {
+        return false;
+    }
+    RefreshItemsFromStore();
+    UpdateScrollInfo();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
+}
+
 LRESULT CALLBACK Sidebar::WindowProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param) {
     Sidebar* self = nullptr;
     if (message == WM_NCCREATE) {
@@ -190,14 +258,84 @@ LRESULT CALLBACK Sidebar::WindowProc(HWND hwnd, UINT message, WPARAM w_param, LP
     return DefWindowProcW(hwnd, message, w_param, l_param);
 }
 
+LRESULT CALLBACK Sidebar::SearchEditSubclassProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM w_param,
+    LPARAM l_param,
+    UINT_PTR subclass_id,
+    DWORD_PTR ref_data) {
+    (void)subclass_id;
+    auto* self = reinterpret_cast<Sidebar*>(ref_data);
+    if (self == nullptr) {
+        return DefSubclassProc(hwnd, message, w_param, l_param);
+    }
+
+    switch (message) {
+    case WM_KEYDOWN:
+        if (w_param == VK_RETURN) {
+            self->DispatchSearchRequest();
+            return 0;
+        }
+        if (w_param == VK_ESCAPE) {
+            self->ClearSearchText(true);
+            return 0;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return DefSubclassProc(hwnd, message, w_param, l_param);
+}
+
+LRESULT CALLBACK Sidebar::RenameEditSubclassProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM w_param,
+    LPARAM l_param,
+    UINT_PTR subclass_id,
+    DWORD_PTR ref_data) {
+    (void)subclass_id;
+    auto* self = reinterpret_cast<Sidebar*>(ref_data);
+    if (self == nullptr) {
+        return DefSubclassProc(hwnd, message, w_param, l_param);
+    }
+
+    switch (message) {
+    case WM_KEYDOWN:
+        if (w_param == VK_RETURN) {
+            self->EndRenameItemEdit(true);
+            return 0;
+        }
+        if (w_param == VK_ESCAPE) {
+            self->EndRenameItemEdit(false);
+            return 0;
+        }
+        break;
+
+    case WM_KILLFOCUS:
+        self->EndRenameItemEdit(true);
+        return 0;
+
+    default:
+        break;
+    }
+
+    return DefSubclassProc(hwnd, message, w_param, l_param);
+}
+
 LRESULT Sidebar::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
     switch (message) {
     case WM_SIZE:
+        EndRenameItemEdit(true);
         UpdateScrollInfo();
         InvalidateRect(hwnd_, nullptr, TRUE);
         return 0;
 
     case WM_MOUSEWHEEL: {
+        EndRenameItemEdit(true);
         const int delta = GET_WHEEL_DELTA_WPARAM(w_param);
         RECT client_rect = {};
         if (!GetClientRect(hwnd_, &client_rect)) {
@@ -212,6 +350,7 @@ LRESULT Sidebar::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
     }
 
     case WM_VSCROLL: {
+        EndRenameItemEdit(true);
         RECT client_rect = {};
         if (!GetClientRect(hwnd_, &client_rect)) {
             LogLastError(L"GetClientRect(Sidebar WM_VSCROLL)");
@@ -298,6 +437,19 @@ LRESULT Sidebar::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
 
     case WM_LBUTTONDOWN: {
         POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+        RECT client_rect = {};
+        if (GetClientRect(hwnd_, &client_rect)) {
+            const LayoutInfo layout = BuildLayout(client_rect);
+            if (PtInRect(&layout.search_rect, point)) {
+                if (clear_button_visible_ && PtInRect(&clear_button_rect_, point)) {
+                    ClearSearchText(true);
+                } else {
+                    FocusSearch();
+                }
+                return 0;
+            }
+        }
+
         Section section = Section::None;
         int item_index = -1;
         if (!HitTestItem(point, &section, &item_index) || section == Section::None || item_index < 0) {
@@ -339,13 +491,13 @@ LRESULT Sidebar::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
             return 0;
         }
 
-        auto menu_path_it = flyout_menu_paths_.find(submenu);
-        if (menu_path_it == flyout_menu_paths_.end()) {
+        auto metadata_it = flyout_menu_metadata_.find(submenu);
+        if (metadata_it == flyout_menu_metadata_.end()) {
             return 0;
         }
 
         flyout_pending_selection_ = true;
-        flyout_pending_target_ = {menu_path_it->second, true};
+        flyout_pending_target_ = {metadata_it->second.path, true};
         if (!EndMenu()) {
             LogLastError(L"EndMenu(Sidebar WM_MENUSELECT)");
         }
@@ -395,6 +547,15 @@ LRESULT Sidebar::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
     }
 
     case WM_COMMAND: {
+        const HWND command_hwnd = reinterpret_cast<HWND>(l_param);
+        if (command_hwnd == search_edit_hwnd_) {
+            if (HIWORD(w_param) == EN_CHANGE) {
+                UpdateScrollInfo();
+                InvalidateRect(hwnd_, nullptr, FALSE);
+            }
+            return 0;
+        }
+
         if (!flyout_popup_active_) {
             break;
         }
@@ -420,19 +581,47 @@ LRESULT Sidebar::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
             break;
         }
 
-        auto path_it = flyout_menu_paths_.find(popup_menu);
-        if (path_it == flyout_menu_paths_.end()) {
+        auto metadata_it = flyout_menu_metadata_.find(popup_menu);
+        if (metadata_it == flyout_menu_metadata_.end()) {
             break;
         }
-        if (flyout_populated_menus_.find(popup_menu) != flyout_populated_menus_.end()) {
+        if (metadata_it->second.loaded || metadata_it->second.loading) {
             return 0;
         }
 
-        PopulateFlyoutMenu(popup_menu, path_it->second, false, L"");
+        BeginFlyoutMenuLoad(popup_menu);
+        return 0;
+    }
+
+    case kSidebarMessageFlyoutLoaded: {
+        auto result = std::unique_ptr<FlyoutAsyncResult>(reinterpret_cast<FlyoutAsyncResult*>(l_param));
+        if (!result) {
+            return 0;
+        }
+
+        auto request_it = flyout_request_menus_.find(result->request_id);
+        if (request_it == flyout_request_menus_.end()) {
+            return 0;
+        }
+
+        const HMENU menu = request_it->second;
+        flyout_request_menus_.erase(request_it);
+
+        auto metadata_it = flyout_menu_metadata_.find(menu);
+        if (metadata_it == flyout_menu_metadata_.end() || metadata_it->second.request_id != result->request_id) {
+            return 0;
+        }
+
+        FlyoutMenuMetadata metadata = metadata_it->second;
+        metadata_it->second.loading = false;
+        metadata_it->second.loaded = true;
+        metadata_it->second.request_id = 0;
+        ApplyFlyoutMenuEntries(menu, metadata, result->entries);
         return 0;
     }
 
     case WM_CONTEXTMENU: {
+        EndRenameItemEdit(true);
         POINT screen_point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
         POINT client_point = screen_point;
 
@@ -486,7 +675,33 @@ LRESULT Sidebar::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
     case WM_ERASEBKGND:
         return 1;
 
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORSTATIC:
+        if (reinterpret_cast<HWND>(l_param) == search_edit_hwnd_ ||
+            reinterpret_cast<HWND>(l_param) == rename_edit_hwnd_) {
+            HDC hdc = reinterpret_cast<HDC>(w_param);
+            if (hdc != nullptr) {
+                SetTextColor(hdc, kItemTextColor);
+                SetBkColor(hdc, kSearchBackgroundColor);
+                SetBkMode(hdc, OPAQUE);
+            }
+            if (search_edit_brush_ != nullptr) {
+                return reinterpret_cast<LRESULT>(search_edit_brush_.get());
+            }
+        }
+        break;
+
     case WM_NCDESTROY:
+        EndRenameItemEdit(false);
+        if (search_edit_hwnd_ != nullptr) {
+            RemoveWindowSubclass(search_edit_hwnd_, &Sidebar::SearchEditSubclassProc, kSearchEditSubclassId);
+            search_edit_hwnd_ = nullptr;
+        }
+        if (rename_edit_hwnd_ != nullptr) {
+            RemoveWindowSubclass(rename_edit_hwnd_, &Sidebar::RenameEditSubclassProc, kRenameEditSubclassId);
+            rename_edit_hwnd_ = nullptr;
+        }
+        ClearFlyoutPopupState();
         SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
         hwnd_ = nullptr;
         break;
@@ -552,26 +767,119 @@ void Sidebar::EnsureFonts() {
         }
         item_font_height_ = desired_item;
     }
+
+    if (search_edit_hwnd_ != nullptr && item_font_ != nullptr) {
+        SendMessageW(search_edit_hwnd_, WM_SETFONT, reinterpret_cast<WPARAM>(item_font_.get()), FALSE);
+    }
+}
+
+bool Sidebar::CreateSearchEditControl() {
+    if (hwnd_ == nullptr) {
+        return false;
+    }
+
+    search_edit_brush_.reset(CreateSolidBrush(kSearchBackgroundColor));
+    if (search_edit_brush_ == nullptr) {
+        LogLastError(L"CreateSolidBrush(Sidebar SearchEdit)");
+    }
+
+    search_edit_hwnd_ = CreateWindowExW(
+        0,
+        WC_EDITW,
+        L"",
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+        0,
+        0,
+        0,
+        0,
+        hwnd_,
+        nullptr,
+        instance_,
+        nullptr);
+    if (search_edit_hwnd_ == nullptr) {
+        LogLastError(L"CreateWindowExW(Sidebar SearchEdit)");
+        return false;
+    }
+
+    const HRESULT theme_hr = SetWindowTheme(search_edit_hwnd_, L"", L"");
+    (void)theme_hr;
+
+    if (item_font_ != nullptr) {
+        SendMessageW(search_edit_hwnd_, WM_SETFONT, reinterpret_cast<WPARAM>(item_font_.get()), FALSE);
+    }
+    if (!SetWindowSubclass(
+            search_edit_hwnd_,
+            &Sidebar::SearchEditSubclassProc,
+            kSearchEditSubclassId,
+            reinterpret_cast<DWORD_PTR>(this))) {
+        LogLastError(L"SetWindowSubclass(Sidebar SearchEdit)");
+        return false;
+    }
+
+    SendMessageW(search_edit_hwnd_, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(L"Search"));
+    return true;
+}
+
+void Sidebar::UpdateSearchEditLayout(const LayoutInfo& layout) {
+    if (search_edit_hwnd_ == nullptr) {
+        return;
+    }
+
+    RECT edit_rect = layout.search_rect;
+    edit_rect.left += ScaleForDpi(10, dpi_);
+    edit_rect.top += ScaleForDpi(6, dpi_);
+    edit_rect.bottom -= ScaleForDpi(6, dpi_);
+    edit_rect.right -= ScaleForDpi(SearchHasText() ? 26 : 10, dpi_);
+    if (edit_rect.right <= edit_rect.left) {
+        edit_rect.right = edit_rect.left + ScaleForDpi(24, dpi_);
+    }
+
+    if (!MoveWindow(
+            search_edit_hwnd_,
+            edit_rect.left,
+            edit_rect.top,
+            edit_rect.right - edit_rect.left,
+            edit_rect.bottom - edit_rect.top,
+            TRUE)) {
+        LogLastError(L"MoveWindow(Sidebar SearchEdit)");
+    }
 }
 
 void Sidebar::BuildDefaultItems() {
+    favourites_store_.UseDefaultStoragePaths();
+    if (!favourites_store_.Load()) {
+        return;
+    }
+
+    // Keep the previous Phase 6 default quick-start favourites only on first run.
+    if (!favourites_store_.had_existing_files_on_last_load() &&
+        favourites_store_.GetFlyouts().empty() &&
+        favourites_store_.GetRegulars().empty()) {
+        favourites_store_.AddFlyout(UserProfilePath(), L"Home");
+        favourites_store_.AddFlyout(L"C:\\", L"System Drive");
+        favourites_store_.AddFlyout(L"C:\\Windows", L"Windows");
+
+        favourites_store_.AddRegular(BuildUserChildPath(L"Documents"), L"Documents");
+        favourites_store_.AddRegular(BuildUserChildPath(L"Pictures"), L"Pictures");
+        favourites_store_.AddRegular(BuildUserChildPath(L"Music"), L"Music");
+    }
+
+    RefreshItemsFromStore();
+}
+
+void Sidebar::RefreshItemsFromStore() {
     flyout_items_.clear();
     favourite_items_.clear();
 
-    const std::wstring user_home = UserProfilePath();
-    flyout_items_.push_back({L"Home", user_home, true});
-    flyout_items_.push_back({L"System Drive", L"C:\\", true});
-    flyout_items_.push_back({L"Windows", L"C:\\Windows", true});
+    flyout_items_.reserve(favourites_store_.GetFlyouts().size());
+    for (const FavouriteEntry& entry : favourites_store_.GetFlyouts()) {
+        flyout_items_.push_back({entry.friendly_name, entry.path, true});
+    }
 
-    favourite_items_.push_back({L"Documents", BuildUserChildPath(L"Documents"), false});
-    favourite_items_.push_back({L"Pictures", BuildUserChildPath(L"Pictures"), false});
-    favourite_items_.push_back({L"Music", BuildUserChildPath(L"Music"), false});
-
-    auto by_name = [](const SidebarItem& left, const SidebarItem& right) {
-        return CompareTextInsensitive(left.name, right.name) < 0;
-    };
-    std::sort(flyout_items_.begin(), flyout_items_.end(), by_name);
-    std::sort(favourite_items_.begin(), favourite_items_.end(), by_name);
+    favourite_items_.reserve(favourites_store_.GetRegulars().size());
+    for (const FavouriteEntry& entry : favourites_store_.GetRegulars()) {
+        favourite_items_.push_back({entry.friendly_name, entry.path, false});
+    }
 }
 
 void Sidebar::Paint(HDC hdc) {
@@ -609,15 +917,30 @@ void Sidebar::Paint(HDC hdc) {
         static_cast<int>(client_rect.right) - ScaleForDpi(12, dpi_));
 
     FillRoundedRect(hdc, layout.search_rect, kSearchBackgroundColor, kSearchBorderColor, ScaleForDpi(6, dpi_));
+    UpdateSearchEditLayout(layout);
 
-    if (item_font_ != nullptr) {
-        SelectObject(hdc, item_font_.get());
+    clear_button_visible_ = false;
+    SetRectEmpty(&clear_button_rect_);
+    if (SearchHasText()) {
+        clear_button_visible_ = true;
+        const int button_size = ScaleForDpi(12, dpi_);
+        clear_button_rect_.right = layout.search_rect.right - ScaleForDpi(9, dpi_);
+        clear_button_rect_.left = clear_button_rect_.right - button_size;
+        clear_button_rect_.top =
+            layout.search_rect.top + ((layout.search_rect.bottom - layout.search_rect.top) - button_size) / 2;
+        clear_button_rect_.bottom = clear_button_rect_.top + button_size;
+
+        HPEN clear_pen = CreatePen(PS_SOLID, 1, kSearchTextColor);
+        if (clear_pen != nullptr) {
+            HGDIOBJ old_pen = SelectObject(hdc, clear_pen);
+            MoveToEx(hdc, clear_button_rect_.left, clear_button_rect_.top, nullptr);
+            LineTo(hdc, clear_button_rect_.right, clear_button_rect_.bottom);
+            MoveToEx(hdc, clear_button_rect_.left, clear_button_rect_.bottom, nullptr);
+            LineTo(hdc, clear_button_rect_.right, clear_button_rect_.top);
+            SelectObject(hdc, old_pen);
+            DeleteObject(clear_pen);
+        }
     }
-    SetBkMode(hdc, TRANSPARENT);
-    SetTextColor(hdc, kSearchTextColor);
-    RECT search_text_rect = layout.search_rect;
-    search_text_rect.left += ScaleForDpi(10, dpi_);
-    DrawTextW(hdc, L"Search", -1, &search_text_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
     if (layout.content_bottom <= layout.content_top) {
         return;
@@ -626,6 +949,8 @@ void Sidebar::Paint(HDC hdc) {
     if (header_font_ != nullptr) {
         SelectObject(hdc, header_font_.get());
     }
+    SetBkMode(hdc, TRANSPARENT);
+    SetBkColor(hdc, kSidebarBackgroundColor);
     SetTextColor(hdc, kHeaderTextColor);
 
     RECT flyout_header_rect = {};
@@ -633,13 +958,7 @@ void Sidebar::Paint(HDC hdc) {
     flyout_header_rect.right = search_right;
     flyout_header_rect.top = layout.content_top + (layout.flyout_header_logical_top - scroll_offset_);
     flyout_header_rect.bottom = flyout_header_rect.top + ScaleForDpi(18, dpi_);
-    FillRoundedRect(
-        hdc,
-        flyout_header_rect,
-        kSectionHeaderSurface,
-        kSectionHeaderSurface,
-        ScaleForDpi(4, dpi_));
-    flyout_header_rect.left += ScaleForDpi(8, dpi_);
+    flyout_header_rect.left += ScaleForDpi(2, dpi_);
     DrawTextW(hdc, L"Flyout Favourites", -1, &flyout_header_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
     RECT favourites_header_rect = {};
@@ -647,13 +966,7 @@ void Sidebar::Paint(HDC hdc) {
     favourites_header_rect.right = search_right;
     favourites_header_rect.top = layout.content_top + (layout.favourites_header_logical_top - scroll_offset_);
     favourites_header_rect.bottom = favourites_header_rect.top + ScaleForDpi(18, dpi_);
-    FillRoundedRect(
-        hdc,
-        favourites_header_rect,
-        kSectionHeaderSurface,
-        kSectionHeaderSurface,
-        ScaleForDpi(4, dpi_));
-    favourites_header_rect.left += ScaleForDpi(8, dpi_);
+    favourites_header_rect.left += ScaleForDpi(2, dpi_);
     DrawTextW(hdc, L"Favourites", -1, &favourites_header_rect, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 
     const int item_left = ScaleForDpi(16, dpi_);
@@ -664,6 +977,7 @@ void Sidebar::Paint(HDC hdc) {
     if (item_font_ != nullptr) {
         SelectObject(hdc, item_font_.get());
     }
+    SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, kItemTextColor);
 
     auto draw_item_row = [&](const SidebarItem& item, Section section, int index, int logical_top) {
@@ -800,6 +1114,7 @@ void Sidebar::UpdateScrollInfo() {
     scroll_info.nPage = static_cast<UINT>((std::max)(0, layout.content_bottom - layout.content_top));
     scroll_info.nPos = scroll_offset_;
     SetScrollInfo(hwnd_, SB_VERT, &scroll_info, TRUE);
+    UpdateSearchEditLayout(layout);
 }
 
 int Sidebar::MaxScrollOffset(const LayoutInfo& layout) const {
@@ -905,10 +1220,20 @@ void Sidebar::ShowItemContextMenu(POINT screen_point, Section section, int item_
         screen_point.y,
         hwnd_,
         nullptr));
-    (void)command;
 
     if (!DestroyMenu(menu)) {
         LogLastError(L"DestroyMenu(Sidebar)");
+    }
+
+    switch (command) {
+    case kMenuRemove:
+        RemoveItem(section, item_index);
+        break;
+    case kMenuRename:
+        BeginRenameItem(section, item_index);
+        break;
+    default:
+        break;
     }
 }
 
@@ -934,6 +1259,209 @@ void Sidebar::HandleItemInvoke(Section section, int item_index, POINT screen_poi
     }
 
     PostNavigatePath(item->path);
+}
+
+bool Sidebar::RemoveItem(Section section, int item_index) {
+    const FavouriteType type =
+        (section == Section::Flyout) ? FavouriteType::Flyout : FavouriteType::Regular;
+    if (section != Section::Flyout && section != Section::Favourites) {
+        return false;
+    }
+    if (item_index < 0) {
+        return false;
+    }
+
+    if (!favourites_store_.Remove(type, static_cast<size_t>(item_index))) {
+        return false;
+    }
+
+    RefreshItemsFromStore();
+    EndRenameItemEdit(false);
+    UpdateScrollInfo();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
+}
+
+bool Sidebar::BeginRenameItem(Section section, int item_index) {
+    if (section != Section::Flyout && section != Section::Favourites) {
+        return false;
+    }
+    if (item_index < 0) {
+        return false;
+    }
+
+    const std::vector<SidebarItem>* items = (section == Section::Flyout) ? &flyout_items_ : &favourite_items_;
+    if (item_index >= static_cast<int>(items->size())) {
+        return false;
+    }
+
+    EndRenameItemEdit(false);
+
+    RECT edit_rect = {};
+    if (!ResolveItemTextRect(section, item_index, &edit_rect)) {
+        return false;
+    }
+
+    rename_edit_hwnd_ = CreateWindowExW(
+        0,
+        WC_EDITW,
+        (*items)[item_index].name.c_str(),
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        edit_rect.left,
+        edit_rect.top,
+        edit_rect.right - edit_rect.left,
+        edit_rect.bottom - edit_rect.top,
+        hwnd_,
+        nullptr,
+        instance_,
+        nullptr);
+    if (rename_edit_hwnd_ == nullptr) {
+        LogLastError(L"CreateWindowExW(Sidebar RenameEdit)");
+        return false;
+    }
+
+    const HRESULT theme_hr = SetWindowTheme(rename_edit_hwnd_, L"", L"");
+    (void)theme_hr;
+    if (item_font_ != nullptr) {
+        SendMessageW(rename_edit_hwnd_, WM_SETFONT, reinterpret_cast<WPARAM>(item_font_.get()), FALSE);
+    }
+    if (!SetWindowSubclass(
+            rename_edit_hwnd_,
+            &Sidebar::RenameEditSubclassProc,
+            kRenameEditSubclassId,
+            reinterpret_cast<DWORD_PTR>(this))) {
+        LogLastError(L"SetWindowSubclass(Sidebar RenameEdit)");
+        DestroyWindow(rename_edit_hwnd_);
+        rename_edit_hwnd_ = nullptr;
+        return false;
+    }
+
+    rename_section_ = section;
+    rename_item_index_ = item_index;
+    SetFocus(rename_edit_hwnd_);
+    SendMessageW(rename_edit_hwnd_, EM_SETSEL, 0, -1);
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
+}
+
+void Sidebar::EndRenameItemEdit(bool commit) {
+    if (rename_edit_closing_ || rename_edit_hwnd_ == nullptr) {
+        return;
+    }
+
+    rename_edit_closing_ = true;
+
+    if (commit) {
+        const int text_length = GetWindowTextLengthW(rename_edit_hwnd_);
+        std::vector<wchar_t> buffer(static_cast<size_t>(text_length) + 1, L'\0');
+        if (GetWindowTextW(rename_edit_hwnd_, buffer.data(), static_cast<int>(buffer.size())) > 0) {
+            const FavouriteType type =
+                (rename_section_ == Section::Flyout) ? FavouriteType::Flyout : FavouriteType::Regular;
+            const std::wstring new_name = TrimWhitespace(buffer.data());
+            if (!new_name.empty() && rename_item_index_ >= 0) {
+                favourites_store_.Rename(type, static_cast<size_t>(rename_item_index_), new_name);
+                RefreshItemsFromStore();
+            }
+        }
+    }
+
+    RemoveWindowSubclass(rename_edit_hwnd_, &Sidebar::RenameEditSubclassProc, kRenameEditSubclassId);
+    DestroyWindow(rename_edit_hwnd_);
+    rename_edit_hwnd_ = nullptr;
+    rename_section_ = Section::None;
+    rename_item_index_ = -1;
+    rename_edit_closing_ = false;
+    UpdateScrollInfo();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
+bool Sidebar::ResolveItemTextRect(Section section, int item_index, RECT* rect) const {
+    if (rect == nullptr || hwnd_ == nullptr) {
+        return false;
+    }
+
+    RECT client_rect = {};
+    if (!GetClientRect(hwnd_, &client_rect)) {
+        return false;
+    }
+    const LayoutInfo layout = BuildLayout(client_rect);
+
+    const int row_height = layout.row_height;
+    const int logical_start =
+        (section == Section::Flyout) ? layout.flyout_items_logical_top : layout.favourites_items_logical_top;
+    const int row_top = layout.content_top + (logical_start - scroll_offset_) + (item_index * row_height);
+    const int row_bottom = row_top + row_height;
+    if (row_bottom <= layout.content_top || row_top >= layout.content_bottom) {
+        return false;
+    }
+
+    const int item_left = ScaleForDpi(16, dpi_);
+    const int item_text_offset = ScaleForDpi(10, dpi_);
+    const int right_padding = ScaleForDpi(12, dpi_);
+    const int arrow_reserve = (section == Section::Flyout) ? ScaleForDpi(18, dpi_) : 0;
+
+    rect->left = item_left + item_text_offset - ScaleForDpi(2, dpi_);
+    rect->right = layout.search_rect.right - right_padding - arrow_reserve;
+    rect->top = row_top + ScaleForDpi(2, dpi_);
+    rect->bottom = row_bottom - ScaleForDpi(2, dpi_);
+    if (rect->right <= rect->left) {
+        rect->right = rect->left + ScaleForDpi(32, dpi_);
+    }
+    return true;
+}
+
+void Sidebar::DispatchSearchRequest() {
+    if (parent_hwnd_ == nullptr) {
+        return;
+    }
+
+    std::wstring query = TrimWhitespace(SearchText());
+    if (query.empty()) {
+        DispatchSearchClear();
+        return;
+    }
+
+    auto payload = std::make_unique<std::wstring>(std::move(query));
+    if (!PostMessageW(
+            parent_hwnd_,
+            WM_FE_SIDEBAR_SEARCH_REQUEST,
+            0,
+            reinterpret_cast<LPARAM>(payload.get()))) {
+        LogLastError(L"PostMessageW(WM_FE_SIDEBAR_SEARCH_REQUEST)");
+        return;
+    }
+    payload.release();
+}
+
+void Sidebar::DispatchSearchClear() {
+    if (parent_hwnd_ == nullptr) {
+        return;
+    }
+
+    if (!PostMessageW(parent_hwnd_, WM_FE_SIDEBAR_SEARCH_CLEAR, 0, 0)) {
+        LogLastError(L"PostMessageW(WM_FE_SIDEBAR_SEARCH_CLEAR)");
+    }
+}
+
+std::wstring Sidebar::SearchText() const {
+    if (search_edit_hwnd_ == nullptr) {
+        return L"";
+    }
+
+    const int text_length = GetWindowTextLengthW(search_edit_hwnd_);
+    if (text_length <= 0) {
+        return L"";
+    }
+
+    std::vector<wchar_t> buffer(static_cast<size_t>(text_length) + 1, L'\0');
+    if (GetWindowTextW(search_edit_hwnd_, buffer.data(), text_length + 1) <= 0) {
+        return L"";
+    }
+    return std::wstring(buffer.data());
+}
+
+bool Sidebar::SearchHasText() const {
+    return !SearchText().empty();
 }
 
 void Sidebar::PostNavigatePath(const std::wstring& path) const {
@@ -1110,11 +1638,23 @@ void Sidebar::ShowFlyoutPopup(const SidebarItem& item, POINT screen_point) {
     flyout_menu_left_button_was_down_ = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
     InstallFlyoutMenuHook();
 
+    POINT popup_point = screen_point;
+    MONITORINFO monitor_info = {};
+    monitor_info.cbSize = sizeof(monitor_info);
+    const HMONITOR monitor = MonitorFromPoint(screen_point, MONITOR_DEFAULTTONEAREST);
+    if (monitor != nullptr && GetMonitorInfoW(monitor, &monitor_info)) {
+        const int reserved_nested_width = ScaleForDpi(560, dpi_);
+        popup_point.x = (std::min)(popup_point.x, monitor_info.rcWork.right - reserved_nested_width);
+        popup_point.x = (std::max)(popup_point.x, monitor_info.rcWork.left + ScaleForDpi(8, dpi_));
+        popup_point.y = (std::max)(popup_point.y, monitor_info.rcWork.top + ScaleForDpi(8, dpi_));
+        popup_point.y = (std::min)(popup_point.y, monitor_info.rcWork.bottom - ScaleForDpi(8, dpi_));
+    }
+
     const UINT selected_command = static_cast<UINT>(TrackPopupMenuEx(
         menu,
         TPM_RIGHTBUTTON | TPM_RETURNCMD,
-        screen_point.x,
-        screen_point.y,
+        popup_point.x,
+        popup_point.y,
         hwnd_,
         nullptr));
     RemoveFlyoutMenuHook();
@@ -1170,9 +1710,11 @@ void Sidebar::ClearFlyoutPopupState() {
     RemoveFlyoutMenuHook();
     flyout_popup_active_ = false;
     next_flyout_command_id_ = kFlyoutMenuFirstCommand;
+    next_flyout_request_id_ = 1;
     flyout_command_targets_.clear();
     flyout_position_targets_.clear();
-    flyout_menu_paths_.clear();
+    flyout_menu_metadata_.clear();
+    flyout_request_menus_.clear();
     flyout_populated_menus_.clear();
     flyout_pending_selection_ = false;
     flyout_pending_target_ = {};
@@ -1210,6 +1752,15 @@ bool Sidebar::PopulateFlyoutMenu(
         }
     }
 
+    FlyoutMenuMetadata metadata = {};
+    metadata.path = NormalizePath(base_path);
+    metadata.include_top_open_row = include_top_open_row;
+    metadata.top_open_label = top_open_label;
+    metadata.loading = false;
+    metadata.loaded = false;
+    metadata.request_id = 0;
+    flyout_menu_metadata_[menu] = metadata;
+
     bool appended_any = false;
     if (include_top_open_row) {
         const UINT command_id = NextFlyoutCommandId();
@@ -1227,65 +1778,161 @@ bool Sidebar::PopulateFlyoutMenu(
         }
     }
 
-    const std::vector<FlyoutEntry> entries = EnumerateFlyoutEntries(base_path);
-    if (entries.empty()) {
-        flyout_populated_menus_.insert(menu);
-        return appended_any;
+    if (include_top_open_row && !AppendMenuW(menu, MF_SEPARATOR, 0, nullptr)) {
+        LogLastError(L"AppendMenuW(Sidebar Flyout Separator)");
+    }
+    if (!AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"Loading...")) {
+        LogLastError(L"AppendMenuW(Sidebar Flyout Loading)");
+    } else {
+        appended_any = true;
     }
 
-    if (include_top_open_row) {
-        if (!AppendMenuW(menu, MF_SEPARATOR, 0, nullptr)) {
-            LogLastError(L"AppendMenuW(Sidebar Flyout Separator)");
+    flyout_populated_menus_.insert(menu);
+    BeginFlyoutMenuLoad(menu);
+    return appended_any;
+}
+
+bool Sidebar::BeginFlyoutMenuLoad(HMENU menu) {
+    auto metadata_it = flyout_menu_metadata_.find(menu);
+    if (metadata_it == flyout_menu_metadata_.end()) {
+        return false;
+    }
+    if (metadata_it->second.loading || metadata_it->second.loaded) {
+        return true;
+    }
+    if (hwnd_ == nullptr) {
+        return false;
+    }
+
+    const uint64_t request_id = next_flyout_request_id_++;
+    metadata_it->second.loading = true;
+    metadata_it->second.request_id = request_id;
+    flyout_request_menus_[request_id] = menu;
+
+    const std::wstring request_path = metadata_it->second.path;
+    const HWND target_hwnd = hwnd_;
+    std::thread(
+        [target_hwnd, request_id, request_path]() {
+            auto payload = std::make_unique<Sidebar::FlyoutAsyncResult>();
+            payload->request_id = request_id;
+            payload->entries = Sidebar::EnumerateFlyoutEntries(request_path);
+            if (!PostMessageW(
+                    target_hwnd,
+                    kSidebarMessageFlyoutLoaded,
+                    0,
+                    reinterpret_cast<LPARAM>(payload.get()))) {
+                LogLastError(L"PostMessageW(Sidebar FlyoutLoaded)");
+                return;
+            }
+            payload.release();
+        })
+        .detach();
+    return true;
+}
+
+void Sidebar::ApplyFlyoutMenuEntries(
+    HMENU menu,
+    const FlyoutMenuMetadata& metadata,
+    const std::vector<FlyoutEntry>& entries) {
+    if (menu == nullptr) {
+        return;
+    }
+
+    while (GetMenuItemCount(menu) > 0) {
+        if (!DeleteMenu(menu, 0, MF_BYPOSITION)) {
+            LogLastError(L"DeleteMenu(Sidebar Flyout Replace)");
+            break;
         }
+    }
+
+    bool appended_any = false;
+    if (metadata.include_top_open_row) {
+        const UINT command_id = NextFlyoutCommandId();
+        const FlyoutCommandTarget target = {NormalizePath(metadata.path), true};
+        flyout_command_targets_[command_id] = target;
+        const std::wstring label = metadata.top_open_label.empty() ? L"Open folder" : metadata.top_open_label;
+        if (AppendMenuW(menu, MF_STRING, command_id, label.c_str())) {
+            const int count = GetMenuItemCount(menu);
+            if (count > 0) {
+                RememberFlyoutMenuPositionTarget(menu, static_cast<UINT>(count - 1), target);
+            }
+            appended_any = true;
+        } else {
+            LogLastError(L"AppendMenuW(Sidebar Flyout OpenRoot Async)");
+        }
+    }
+
+    if (!entries.empty() && metadata.include_top_open_row) {
+        if (!AppendMenuW(menu, MF_SEPARATOR, 0, nullptr)) {
+            LogLastError(L"AppendMenuW(Sidebar Flyout Separator Async)");
+        }
+    }
+
+    if (entries.empty()) {
+        if (!metadata.include_top_open_row) {
+            if (!AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"(Empty)")) {
+                LogLastError(L"AppendMenuW(Sidebar Flyout Empty)");
+            }
+        }
+        flyout_populated_menus_.insert(menu);
+        return;
     }
 
     for (const FlyoutEntry& entry : entries) {
         if (entry.is_folder) {
-            const std::vector<FlyoutEntry> child_entries = EnumerateFlyoutEntries(entry.path);
-            if (!child_entries.empty()) {
-                HMENU submenu = CreatePopupMenu();
-                if (submenu != nullptr) {
-                    ConfigureMenuForNotifications(submenu);
-                    flyout_menu_paths_[submenu] = entry.path;
-                    if (!AppendMenuW(submenu, MF_STRING | MF_GRAYED, 0, L"...")) {
-                        LogLastError(L"AppendMenuW(Sidebar Flyout Placeholder)");
-                    }
-                    const UINT command_id = NextFlyoutCommandId();
-                    const FlyoutCommandTarget target = {entry.path, true};
-                    flyout_command_targets_[command_id] = target;
-
-                    MENUITEMINFOW menu_item = {};
-                    menu_item.cbSize = sizeof(menu_item);
-                    menu_item.fMask = MIIM_ID | MIIM_SUBMENU | MIIM_STRING;
-                    menu_item.wID = command_id;
-                    menu_item.hSubMenu = submenu;
-                    menu_item.dwTypeData = const_cast<LPWSTR>(entry.name.c_str());
-
-                    if (!InsertMenuItemW(menu, GetMenuItemCount(menu), TRUE, &menu_item)) {
-                        LogLastError(L"InsertMenuItemW(Sidebar Flyout Submenu)");
-                        flyout_command_targets_.erase(command_id);
-                        flyout_menu_paths_.erase(submenu);
-                        if (!DestroyMenu(submenu)) {
-                            LogLastError(L"DestroyMenu(Sidebar Flyout Submenu)");
-                        }
-                    } else {
-                        const int count = GetMenuItemCount(menu);
-                        if (count > 0) {
-                            RememberFlyoutMenuPositionTarget(menu, static_cast<UINT>(count - 1), target);
-                        }
-                        appended_any = true;
-                    }
-                    continue;
-                }
-                LogLastError(L"CreatePopupMenu(Sidebar Flyout Submenu)");
+            HMENU submenu = CreatePopupMenu();
+            if (submenu == nullptr) {
+                LogLastError(L"CreatePopupMenu(Sidebar Flyout Submenu Async)");
+                continue;
             }
+            ConfigureMenuForNotifications(submenu);
+            if (!AppendMenuW(submenu, MF_STRING | MF_GRAYED, 0, L"Loading...")) {
+                LogLastError(L"AppendMenuW(Sidebar Flyout Submenu Loading)");
+            }
+
+            FlyoutMenuMetadata submenu_metadata = {};
+            submenu_metadata.path = entry.path;
+            submenu_metadata.include_top_open_row = false;
+            submenu_metadata.loading = false;
+            submenu_metadata.loaded = false;
+            submenu_metadata.request_id = 0;
+            flyout_menu_metadata_[submenu] = std::move(submenu_metadata);
+
+            const UINT command_id = NextFlyoutCommandId();
+            const FlyoutCommandTarget target = {entry.path, true};
+            flyout_command_targets_[command_id] = target;
+
+            MENUITEMINFOW menu_item = {};
+            menu_item.cbSize = sizeof(menu_item);
+            menu_item.fMask = MIIM_ID | MIIM_SUBMENU | MIIM_STRING;
+            menu_item.wID = command_id;
+            menu_item.hSubMenu = submenu;
+            menu_item.dwTypeData = const_cast<LPWSTR>(entry.name.c_str());
+
+            if (!InsertMenuItemW(menu, GetMenuItemCount(menu), TRUE, &menu_item)) {
+                LogLastError(L"InsertMenuItemW(Sidebar Flyout Submenu Async)");
+                flyout_command_targets_.erase(command_id);
+                flyout_menu_metadata_.erase(submenu);
+                if (!DestroyMenu(submenu)) {
+                    LogLastError(L"DestroyMenu(Sidebar Flyout Submenu Async)");
+                }
+                continue;
+            }
+
+            const int count = GetMenuItemCount(menu);
+            if (count > 0) {
+                RememberFlyoutMenuPositionTarget(menu, static_cast<UINT>(count - 1), target);
+            }
+            flyout_populated_menus_.insert(submenu);
+            appended_any = true;
+            continue;
         }
 
         const UINT command_id = NextFlyoutCommandId();
-        const FlyoutCommandTarget target = {entry.path, entry.is_folder};
+        const FlyoutCommandTarget target = {entry.path, false};
         flyout_command_targets_[command_id] = target;
         if (!AppendMenuW(menu, MF_STRING, command_id, entry.name.c_str())) {
-            LogLastError(L"AppendMenuW(Sidebar Flyout Entry)");
+            LogLastError(L"AppendMenuW(Sidebar Flyout Entry Async)");
             continue;
         }
         const int count = GetMenuItemCount(menu);
@@ -1295,8 +1942,12 @@ bool Sidebar::PopulateFlyoutMenu(
         appended_any = true;
     }
 
+    if (!appended_any && !metadata.include_top_open_row) {
+        if (!AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, L"(Empty)")) {
+            LogLastError(L"AppendMenuW(Sidebar Flyout Empty Async)");
+        }
+    }
     flyout_populated_menus_.insert(menu);
-    return appended_any;
 }
 
 UINT Sidebar::NextFlyoutCommandId() {
@@ -1319,7 +1970,7 @@ UINT Sidebar::NextFlyoutCommandId() {
     return candidate;
 }
 
-std::wstring Sidebar::JoinPath(const std::wstring& base_path, const std::wstring& child_name) const {
+std::wstring Sidebar::JoinPath(const std::wstring& base_path, const std::wstring& child_name) {
     std::wstring combined = NormalizePath(base_path);
     if (!combined.empty() && combined.back() != L'\\') {
         combined.push_back(L'\\');
@@ -1328,7 +1979,7 @@ std::wstring Sidebar::JoinPath(const std::wstring& base_path, const std::wstring
     return NormalizePath(std::move(combined));
 }
 
-std::vector<Sidebar::FlyoutEntry> Sidebar::EnumerateFlyoutEntries(const std::wstring& base_path) const {
+std::vector<Sidebar::FlyoutEntry> Sidebar::EnumerateFlyoutEntries(const std::wstring& base_path) {
     std::vector<FlyoutEntry> entries;
 
     std::wstring wildcard = NormalizePath(base_path);

@@ -11,6 +11,8 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#include <unordered_map>
+#include <unordered_set>
 
 #include "FileListView.h"
 #include "FolderWorker.h"
@@ -53,12 +55,19 @@ private:
     void LayoutChildZones();
     void OnDpiChanged(UINT new_dpi, RECT* suggested_rect);
     void PaintFallbackBackground(HDC hdc);
+    void PaintFileListInsetGutter(HDC hdc);
     void UpdateWindowTitle();
     void HandleTabStateChanged();
     void StartFolderLoad(
         const std::wstring& path,
         bool incremental_refresh,
         const std::wstring& post_load_select_name = L"");
+    void StartSearch(const std::wstring& pattern);
+    void CancelSearchWorker();
+    void ExitSearchModeUi(bool clear_sidebar_text);
+    void StoreSearchSnapshotForTab(uint64_t tab_id);
+    void RemoveSearchSnapshotForTab(uint64_t tab_id);
+    void PruneSearchSnapshots();
     void PreparePostLoadSelectionForTransition(const std::wstring& from_path, const std::wstring& to_path);
     void StartDebouncedRefreshForActiveFolder(uint64_t watch_generation);
     void RestartFolderWatcher(const std::wstring& path);
@@ -85,6 +94,14 @@ private:
     Sidebar sidebar_{};
 
     std::shared_ptr<std::atomic<uint64_t>> folder_generation_source_{};
+    std::shared_ptr<std::atomic<uint64_t>> search_generation_source_{};
+    std::shared_ptr<std::atomic<bool>> search_cancel_token_{};
+    bool search_active_{false};
+    std::wstring search_root_path_{};
+    std::wstring search_pattern_{};
+    ULONGLONG search_started_tick_ms_{0};
+    uint64_t last_active_tab_id_{0};
+    std::unordered_map<uint64_t, FileListView::SearchSnapshot> search_snapshots_{};
     bool pending_incremental_refresh_{false};
 
     std::thread folder_watch_thread_{};

@@ -22,12 +22,12 @@ Rule: Decisions must be explained, not just stated.
 ## Current Status
 
 ```text
-Last updated:      2026-04-18 by assistant
-Current phase:     Phase 6 - Right Sidebar Shell
-Current target:    CP-06 (implementation complete, interactive verification pending)
-Last checkpoint:   CP-05 - PASS
-Build status:      PASS - Debug x64 solution build succeeds after strict visual-only typography consistency refinement (tab/navbar text density matched to detail/sidebar scale)
-Tests status:      PASS - FileExplorer.Tests.exe runs and passes (0 tests, 0 failures)
+Last updated:      2026-04-19 by assistant
+Current phase:     Phase 9 - File Operations
+Current target:    CP-09 (not started)
+Last checkpoint:   CP-08 - PASS
+Build status:      PASS - Debug x64 solution build succeeds after Phase 8 closeout flyout-positioning fix
+Tests status:      PASS - FileExplorer.Tests.exe runs and passes (21 tests, 0 failures)
 Blockers:          None
 ```
 
@@ -43,9 +43,9 @@ Blockers:          None
 | 3 | Navigation Bar & Breadcrumb | Complete | CP-03 | Completed on 2026-04-17 after breadcrumb navigation and dark edit-mode fixes |
 | 4 | Main File List (sync) | Complete | CP-04 | Completed on 2026-04-17 after user-confirmed interaction checklist |
 | 5 | Async Threading | Complete | CP-05 | Completed on 2026-04-17 after parent-folder reselect fix and user verification |
-| 6 | Right Sidebar Shell | Partial | CP-06 | Sidebar shell implemented; interactive verification pending |
-| 7 | Search Engine | Not started | CP-07 | |
-| 8 | Favourites System | Not started | CP-08 | |
+| 6 | Right Sidebar Shell | Complete | CP-06 | Completed on 2026-04-18 (user sign-off confirmed) |
+| 7 | Search Engine | Complete | CP-07 | Completed on 2026-04-18 (user-confirmed CP-07 interactive verification complete) |
+| 8 | Favourites System | Complete | CP-08 | Completed on 2026-04-19 (user-confirmed verification complete, persistence + async flyouts validated) |
 | 9 | File Operations | Not started | CP-09 | |
 | 10 | Visual Polish | Not started | CP-10 | |
 | 11 | Settings & Persistence | Not started | CP-11 | |
@@ -292,11 +292,285 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** Keeping larger headline-like top-row typography (rejected), changing list/sidebar fonts upward instead (rejected to preserve existing comfortable data density).  
 **Status:** Closed  
 
+### AD-037 - 2026-04-18 - Phase 7 Search Pipeline Uses Generation + Cancel Token
+**Decision:** Implement recursive search as a detached background worker (`SearchWorker`) that posts batched `WM_FE_SEARCH_RESULT` payloads and `WM_FE_SEARCH_DONE`, gated by both generation counter and explicit cancel token.  
+**Rationale:** CP-07 requires non-blocking recursive search, incremental updates, and clean cancellation when users start a new search, clear search, or navigate away.  
+**Alternatives considered:** UI-thread recursion (rejected due freeze risk), generation-only cancellation (rejected as less explicit when search is cancelled without immediate navigation).  
+**Status:** Closed  
+
+### AD-038 - 2026-04-18 - Sidebar Search Is Native Edit Control Routed Through MainWindow
+**Decision:** Add a real sidebar `EDIT` control (Enter to search, Escape/clear to exit search mode, Ctrl+F focus support) and keep search orchestration centralized in `MainWindow` and `FileListView` search-mode APIs.  
+**Rationale:** CP-07 requires search box focus/clear interactions and automatic search-mode exit on navigation while preserving existing tab/navigation/favourites architecture.  
+**Alternatives considered:** Handling search entirely inside `Sidebar` (rejected due state duplication), implementing a custom text control (rejected as unnecessary complexity for this phase).  
+**Status:** Closed  
+
+### AD-039 - 2026-04-18 - Search Duration in Status Bar + Sidebar Flat Row Surface Restore
+**Decision:** Add search elapsed-time reporting (`Time: <ms>`) to final search status text, and restore sidebar section row/header presentation to the earlier flatter dark style (remove bright capsule-like header backgrounds).  
+**Rationale:** User requested explicit search performance visibility and rollback of right-pane row styling that appeared too light versus the previous look.  
+**Alternatives considered:** Showing timing only in debug logs (rejected), keeping capsule headers and only darkening colors (rejected in favor of visual rollback).  
+**Status:** Closed  
+
+### AD-040 - 2026-04-18 - Sidebar White Text Background Root-Cause Fix
+**Decision:** Force transparent text background mode in sidebar paint (`SetBkMode(hdc, TRANSPARENT)`) before drawing right-pane headers/items.  
+**Rationale:** Without explicit transparent mode, GDI text drawing used opaque background fill (default/light), causing visible white rectangles behind right-pane text.  
+**Alternatives considered:** Further palette tweaks only (rejected because root cause was paint mode, not color choice).  
+**Status:** Closed  
+
+### AD-041 - 2026-04-18 - Paint Main-Window File-List Left Inset Gutter Explicitly
+**Decision:** Add explicit painting for the main-window file-list left inset gutter in both `WM_ERASEBKGND` and `WM_PAINT` (`PaintFileListInsetGutter`) so uncovered inset pixels are always filled with list-surface color.  
+**Rationale:** User reported white/garbage artifacts in non-maximized state and after maximize/restore transitions; root cause was uncovered inset area not deterministically repainted in all compositor/layout paths.  
+**Alternatives considered:** Remove inset entirely (rejected because inset is intentional visual requirement), rely on default background erase (rejected as unreliable with current chrome/backdrop behavior).  
+**Status:** Closed  
+
+### AD-042 - 2026-04-18 - Search Result "Open file location" Opens in New Tab with Search Snapshot Restore
+**Decision:** Add a search-result-only context-menu action (`Open file location`) that posts a containing-folder navigation request (`WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB`) to `MainWindow`, and preserve per-tab search results by capturing/restoring `FileListView::SearchSnapshot` state keyed by stable `TabManager` tab IDs.  
+**Rationale:** User requested opening containing folders in a new tab from search results while keeping the original search tab intact so returning to it still shows the same results.  
+**Alternatives considered:** Reuse current tab navigation (rejected because it destroys search context), rerun search when returning to tab (rejected due delay/state drift and unnecessary worker load).  
+**Status:** Closed  
+
+### AD-043 - 2026-04-18 - Phase 8 Favourites Persistence + Sidebar Store Integration
+**Decision:** Replace sidebar hardcoded in-memory favourites with `FavouritesStore` backed by CSV files (`flyout_favourites.csv`, `regular_favourites.csv`), wire list context-menu add actions through `MainWindow`, and add sidebar remove/rename editing plus async flyout menu loading via worker-thread enumeration + `PostMessageW` UI updates.  
+**Rationale:** CP-08 requires both favourites systems to be persisted, editable, alphabetically sorted, and non-blocking during flyout expansion.  
+**Alternatives considered:** Keep sidebar-only transient arrays (rejected: no persistence), keep synchronous flyout enumeration on UI thread (rejected: violates async/non-blocking requirement), reroute persistence through unrelated settings/session modules (rejected: higher coupling).  
+**Status:** Closed  
+
+### AD-044 - 2026-04-19 - Flyout Root Popup Repositioning to Preserve Nested Menu Usability
+**Decision:** Clamp initial root flyout popup anchor position within monitor work area and reserve horizontal space for nested submenu expansion, so hover-expanded child menus do not overlap/cover the current menu level.  
+**Rationale:** User reported that nested flyouts were rendering over the current menu, preventing reliable first-level interaction after persistence/async updates.  
+**Alternatives considered:** Disable deep nesting (rejected), force left-side submenu expansion globally (rejected for inconsistent behavior), remove async submenu loading (rejected because CP-08 requires non-blocking flyout enumeration).  
+**Status:** Closed  
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 040 - 2026-04-19
+**Phase:** Phase 8 closeout -> Phase 9 kickoff  
+**Goal for this session:** Fix reported nested flyout overlay regression and close CP-08 after final user confirmation.  
+**Completed:**  
+- Implemented flyout root popup positioning clamp in `Sidebar::ShowFlyoutPopup` to reserve nested submenu space and prevent child menu overlap on first-level flyout.  
+- Rebuilt full solution (`Debug x64`) successfully after flyout-positioning fix.  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+- User confirmed persistence works and flyout behavior now works as expected.  
+- Marked `CP-08` as PASS and moved active project status to `Phase 9 - File Operations` (`CP-09` not started).  
+**Not completed / carried forward:**  
+- Phase 9 implementation has not started yet.  
+**Decisions made:** AD-044  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-08 - Pass  
+**Next session should start with:**  
+- Re-read AGENTS/JOURNAL/PLAN and begin Phase 9 (`CP-09`) implementation.
+
+### Session 039 - 2026-04-18
+**Phase:** Phase 8 - Favourites System  
+**Goal for this session:** Start CP-08 by implementing CSV-backed favourites storage and wiring full sidebar/list integration.  
+**Completed:**  
+- Re-read required startup docs (`AGENTS.MD`, `DEVELOPMENT_JOURNAL.MD`, `PLAN.MD` Phase 8 / CP-08 criteria).  
+- Implemented `CsvParser` (`Parse`, `Serialize`, `ReadFile`, `WriteFile`) with quoted comma/newline handling, trimming for unquoted fields, UTF-8 BOM write/read support, and missing-file-as-empty behavior.  
+- Implemented `FavouritesStore` with:
+  - flyout + regular lists
+  - alphabetical sorting
+  - add/remove/rename mutation APIs
+  - CSV persistence
+  - portable-first storage root with `%APPDATA%\\FileExplorer` fallback.
+- Wired `Sidebar` to persistent store:
+  - load/store integration
+  - remove/rename context menu functionality
+  - inline rename edit control
+  - list refresh from store state.
+- Kept first-run default favourites seeding (Home/System Drive/Windows + Documents/Pictures/Music) only when no CSV files exist.
+- Added `FileListView` -> `MainWindow` messages for `Make Favourite` / `Make Flyout Favourite` folder actions and implemented handling in `MainWindow` to mutate sidebar/store.
+- Converted flyout menu entry loading to async worker-thread enumeration with posted UI updates and loading placeholders for submenu expansion.
+- Added real CSV unit tests in `FileExplorer.Tests/tests/test_csv.cpp` (5 tests).
+- Rebuilt full solution successfully (`Debug x64`, 0 warnings, 0 errors).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- CP-08 final interactive verification/sign-off is still pending.  
+**Decisions made:** AD-043  
+**Errors encountered and resolved:**  
+- `CsvParser::ReadFile`/`WriteFile` shadowed Win32 API names inside class scope; resolved by qualifying API calls as `::ReadFile`/`::WriteFile`.  
+- Test compile failed due unsupported wide-string assertion streaming in local GoogleTest bootstrap; resolved by converting those checks to `EXPECT_TRUE` value comparisons.  
+- One rebuild hit `LNK1168` due running `FileExplorer.exe`; resolved by stopping process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-08 - Partial (implementation complete, interactive verification pending)  
+**Next session should start with:**  
+- Verify CP-08 in-app: add/remove/rename regular + flyout favourites, async flyout expansion responsiveness, restart persistence, and CSV special-character behavior.
+
+### Session 038 - 2026-04-18
+**Phase:** Phase 7 closeout -> Phase 8 kickoff  
+**Goal for this session:** Confirm CP-07 completion status after final user verification and move active target to Phase 8.  
+**Completed:**  
+- User confirmed in-app validation that Phase 7 behavior is working as expected, including search-result `Open file location` new-tab flow and search-tab result persistence on return.  
+- Marked `CP-07` as PASS in Current Status.  
+- Updated active phase to `Phase 8 - Favourites System` with current target `CP-08 (not started)`.  
+- Updated Quick Reference table to mark Phase 7 as `Complete`.  
+**Not completed / carried forward:**  
+- Phase 8 (`CP-08`) implementation has not started yet.  
+**Decisions made:**  
+- None (checkpoint/sign-off status transition only).  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-07 - Pass  
+**Next session should start with:**  
+- Re-read AGENTS/JOURNAL/PLAN and begin Phase 8 (`CP-08`) implementation.
+
+### Session 037 - 2026-04-18
+**Phase:** Phase 7 - Search Engine  
+**Goal for this session:** Add search-result context-menu action `Open file location` that opens containing folder in a new tab and preserves existing search results when switching back.  
+**Completed:**  
+- Re-read required startup docs (`AGENTS.MD`, `DEVELOPMENT_JOURNAL.MD`, `PLAN.MD` Phase 7 / CP-07 criteria).  
+- Added `Open file location` command to file-list context menu with search-mode gating and containing-folder extraction.  
+- Added new UI message `WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB` from `FileListView` to `MainWindow`.  
+- Added stable tab IDs in `TabManager` (`TabState::id`) to support per-tab search snapshot tracking.  
+- Added `FileListView::SearchSnapshot` capture/restore API and integrated it in `MainWindow` (store on tab leave, restore on tab return, prune on tab close, clear on search reset).  
+- Wired open-location command to create a new tab for the containing folder while preserving originating search-tab results.
+- Rebuilt full solution successfully (`Debug x64`, 0 warnings, 0 errors).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`16` tests, `0` failures).  
+- Relaunched updated app for immediate validation (`FileExplorer.exe`, PID 1996).  
+**Not completed / carried forward:**  
+- CP-07 still pending final interactive user verification/sign-off.  
+**Decisions made:** AD-042  
+**Errors encountered and resolved:**  
+- `msbuild` command not present on PATH in shell; resolved by using full VS 18 MSBuild path (`C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\MSBuild.exe`).  
+- Initial relink hit `LNK1168` because `FileExplorer.exe` was still running; resolved by stopping running app instances and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-07 - Partial (verification pending)  
+**Next session should start with:**  
+- Validate in-app flow: search result -> right-click `Open file location` -> new tab opens containing folder; switch back to search tab and confirm results persist unchanged.
+
+### Session 036 - 2026-04-18
+**Phase:** Phase 7 - Search Engine  
+**Goal for this session:** Fix detail-pane left-inset white/transparent artifacting seen in non-maximized and maximize/restore transitions.  
+**Completed:**  
+- Root-caused artifact to uncovered main-window inset strip (left of file list) not being explicitly painted in all paint paths.  
+- Implemented `MainWindow::PaintFileListInsetGutter(HDC)` to compute and fill the inset strip with file-list surface color.  
+- Wired inset paint into both `WM_ERASEBKGND` and `WM_PAINT` to ensure stable visuals across initial show, resize, maximize, and restore transitions.  
+- Rebuilt full solution (`Debug x64`) successfully with 0 warnings / 0 errors.  
+- Relaunched updated app for immediate validation (`FileExplorer.exe`, PID logged).  
+**Not completed / carried forward:**  
+- CP-07 still pending full user interactive verification/sign-off.  
+**Decisions made:** AD-041  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-07 - Partial (verification pending)  
+**Next session should start with:**  
+- Confirm inset artifact is gone in non-maximized and maximize/restore transitions, then continue CP-07 verification checklist.
+
+### Session 035 - 2026-04-18
+**Phase:** Phase 7 - Search Engine  
+**Goal for this session:** Resolve remaining right-pane white text background issue reported after prior sidebar visual rollback.  
+**Completed:**  
+- Root-caused issue in `Sidebar::Paint`: text drawing path lacked explicit transparent background mode.  
+- Applied fix by setting `SetBkMode(hdc, TRANSPARENT)` (and matching background color) before drawing sidebar headers/items.  
+- Rebuilt full solution (`Debug x64`) successfully with 0 warnings / 0 errors.  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`16` tests, `0` failures).  
+- Relaunched updated app for immediate verification (`FileExplorer.exe`, PID logged).  
+**Not completed / carried forward:**  
+- CP-07 still pending full user interactive verification/sign-off.  
+**Decisions made:** AD-040  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-07 - Partial (verification pending)  
+**Next session should start with:**  
+- Confirm right-pane text background issue is gone in-app and continue CP-07 verification checklist.
+
+### Session 034 - 2026-04-18
+**Phase:** Phase 7 - Search Engine  
+**Goal for this session:** Apply user-requested search UX refinements: show elapsed search time in status bar and restore prior darker right-pane row/header visuals.  
+**Completed:**  
+- Added search elapsed-time tracking in `MainWindow` and surfaced it through `FileListView` status text as `Time: <ms>` when search completes.  
+- Extended `FileListView` with `SetSearchElapsedMs` and search status text formatting update.  
+- Restored sidebar section header presentation to a flatter dark style (removed capsule-like header fills) to match previous look.  
+- Hardened search edit theming in sidebar (`SetWindowTheme` + shared dark brush for edit/static color messages) to avoid bright control bleed.  
+- Rebuilt full solution (`Debug x64`) successfully with 0 warnings / 0 errors.  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`16` tests, `0` failures).  
+- Relaunched updated app for user verification (`FileExplorer.exe`, PID logged).  
+**Not completed / carried forward:**  
+- CP-07 remains pending full user interactive verification/sign-off.  
+**Decisions made:** AD-039  
+**Errors encountered and resolved:**  
+- `LNK1168` while rebuilding with running `FileExplorer.exe`; resolved by stopping process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-07 - Partial (verification pending)  
+**Next session should start with:**  
+- Verify search timing label visibility and right-pane visual rollback in-app, then continue remaining CP-07 verification checklist.
+
+### Session 033 - 2026-04-18
+**Phase:** Phase 7 - Search Engine  
+**Goal for this session:** Implement CP-07 core search functionality (worker, wildcard, UI wiring, cancellation, search results mode) and restore compile/test green state.  
+**Completed:**  
+- Re-read required startup docs (`AGENTS.MD`, `DEVELOPMENT_JOURNAL.MD`, `PLAN.MD` Phase 7).  
+- Replaced `WildcardMatch` stub with iterative case-insensitive wildcard engine (`*` and `?`) and added 16 wildcard tests in `test_wildcard.cpp`.  
+- Replaced `SearchWorker` stub with recursive stack-based DFS search worker:
+  - background-thread traversal
+  - wildcard filename matching
+  - batched incremental posting (`WM_FE_SEARCH_RESULT`, batch size 50)
+  - completion post (`WM_FE_SEARCH_DONE`)
+  - generation + cancel-token cancellation guards
+- Extended `FileListView` with search mode APIs:
+  - `BeginSearch`, `AppendSearchResults`, `CompleteSearch`, `LeaveSearchMode`, `IsSearchMode`
+  - Path column visibility in search mode
+  - search-specific status text and empty-state message
+  - search results use full path for open/copy-path behavior
+- Extended `Sidebar` with functional search input:
+  - real `EDIT` control with dark styling
+  - Enter posts search request
+  - Escape and clear (`×`) post search-clear
+  - `FocusSearch` and `ClearSearchText` APIs for `MainWindow`
+- Wired `MainWindow` search orchestration:
+  - start/cancel search lifecycle
+  - handle sidebar search request/clear messages
+  - apply search results and completion messages
+  - Ctrl+F now focuses sidebar search field
+  - navigation and folder loads exit search mode automatically
+- Built full solution successfully (`Debug x64`, 0 warnings, 0 errors).  
+- Ran tests successfully: `FileExplorer.Tests.exe` now passes with 16 wildcard tests, 0 failures.  
+**Not completed / carried forward:**  
+- CP-07 manual interactive verification checklist (large-tree responsiveness and full UX validation) still pending user confirmation.  
+**Decisions made:** AD-037, AD-038  
+**Errors encountered and resolved:**  
+- `msbuild` not on PATH in shell; resolved by using full VS 18 MSBuild executable path.  
+- Solution link failed with `LNK1104` while `FileExplorer.exe` was running; resolved by stopping the process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-07 - Partial (implementation complete, interactive verification pending)  
+**Next session should start with:**  
+- Run CP-07 in-app verification (incremental search updates, clear/escape exit, navigation exit, path column visibility, Ctrl+F focus, cancellation behavior) and close CP-07 after user sign-off.
+
+### Session 032 - 2026-04-18
+**Phase:** Phase 6 closeout  
+**Goal for this session:** Mark CP-06 as ready/pass based on user confirmation and update the journal state.  
+**Completed:**  
+- User confirmed Phase 6 is ready.  
+- Marked `CP-06` as PASS in Current Status and updated phase progression to `Phase 7 - Search Engine` (`CP-07` not started).  
+- Updated quick-reference status for Phase 6 to `Complete`.  
+- Closed the remaining CP-06 tracking known issue entry (`KI-007`).  
+- Ran test executable (`FileExplorer.Tests.exe`) successfully (0 tests, 0 failures).  
+**Not completed / carried forward:**  
+- Phase 7 implementation has not started yet.  
+**Decisions made:**  
+- None (status/sign-off update only).  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-06 - Pass  
+**Next session should start with:**  
+- Re-read AGENTS/JOURNAL/PLAN and begin Phase 7 (`CP-07`) implementation.
 
 ### Session 031 - 2026-04-18
 **Phase:** Phase 6 - Right Sidebar Shell (visual consistency follow-up)  
@@ -1129,13 +1403,83 @@ Entries are appended in reverse chronological order (newest at top).
 | KI-004 | 3 | Low | CP-03 interaction issues (breadcrumb/flyout navigation + edit-mode dark styling) were reported and fixed in Session 005. | Closed |
 | KI-005 | 4 | Low | CP-04 interactive verification/sign-off was pending and is now resolved after user confirmation. | Closed |
 | KI-006 | 5 | Low | CP-05 interactive verification/sign-off was pending and is now resolved after final parent-navigation selection fix. | Closed |
-| KI-007 | 6 | Low | CP-06 sidebar shell is implemented; interactive visual verification/sign-off is pending. | Open |
+| KI-007 | 6 | Low | CP-06 sidebar shell verification pending item is resolved after user sign-off; tracking closed. | Closed |
 
 Severity: Blocker | High | Low | Debt
 
 ---
 
 ## Test Results Log
+
+### Test Run 031 - 2026-04-19
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-flyout-positioning regression fix + CP-08 closeout verification run)  
+**Failures:**  
+- None
+
+### Test Run 030 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 8 favourites persistence/sidebar integration implementation run)  
+**Failures:**  
+- None
+
+### Test Run 029 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 16  
+**Passed:** 16  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-search-result open-location/new-tab snapshot-restore verification run)  
+**Failures:**  
+- None
+
+### Test Run 028 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 16  
+**Passed:** 16  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-sidebar text background paint-mode fix verification run)  
+**Failures:**  
+- None
+
+### Test Run 027 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 16  
+**Passed:** 16  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-search-time + sidebar-visual-rollback verification run)  
+**Failures:**  
+- None
+
+### Test Run 026 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 16  
+**Passed:** 16  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 7 implementation verification run)  
+**Failures:**  
+- None
+
+### Test Run 025 - 2026-04-18
+**Configuration:** Debug x64  
+**Test count:** 0  
+**Passed:** 0  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (CP-06 sign-off journal update verification run)  
+**Failures:**  
+- None
 
 ### Test Run 024 - 2026-04-18
 **Configuration:** Debug x64  

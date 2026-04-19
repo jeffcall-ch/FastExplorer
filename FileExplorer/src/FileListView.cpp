@@ -42,6 +42,7 @@ constexpr UINT kMenuProperties = 7006;
 constexpr UINT kMenuCopyPath = 7007;
 constexpr UINT kMenuMakeFavourite = 7008;
 constexpr UINT kMenuMakeFlyoutFavourite = 7009;
+constexpr UINT kMenuOpenFileLocation = 7010;
 constexpr DWORD kTypeAheadResetMs = 1200;
 constexpr UINT kLoadingTimerMs = 120;
 
@@ -173,7 +174,7 @@ bool FileListView::Create(HWND parent, HINSTANCE instance, int control_id) {
     }
 
     CreateColumns();
-    ApplyScaledColumns();
+    ApplyColumnMode();
     ApplyHeaderVisualStyle();
     EnsureSystemImageList();
     EnsureDividerFont();
@@ -191,7 +192,7 @@ void FileListView::SetDpi(UINT dpi) {
     divider_font_.reset();
     divider_font_height_ = 0;
     EnsureDividerFont();
-    ApplyScaledColumns();
+    ApplyColumnMode();
     ApplyHeaderVisualStyle();
     InvalidateRect(hwnd_, nullptr, TRUE);
 }
@@ -201,6 +202,13 @@ void FileListView::SetPostLoadSelectionName(std::wstring name) {
 }
 
 void FileListView::BeginFolderLoad(const std::wstring& path, bool incremental_refresh) {
+    if (search_mode_) {
+        search_mode_ = false;
+        search_root_path_.clear();
+        search_pattern_.clear();
+        ApplyColumnMode();
+    }
+
     current_path_ = NormalizePath(path);
     pending_incremental_refresh_ = incremental_refresh;
     type_ahead_buffer_.clear();
@@ -235,6 +243,134 @@ void FileListView::ApplyLoadedFolderEntries(std::vector<FileEntry> entries, bool
     SetLoadingState(false);
     pending_incremental_refresh_ = false;
     PostStatusUpdate();
+}
+
+void FileListView::BeginSearch(const std::wstring& root_path, const std::wstring& pattern) {
+    search_mode_ = true;
+    search_root_path_ = NormalizePath(root_path);
+    search_pattern_ = pattern;
+    search_elapsed_ms_ = 0;
+    current_path_ = search_root_path_;
+    pending_incremental_refresh_ = false;
+    post_load_selection_name_.clear();
+    type_ahead_buffer_.clear();
+    type_ahead_last_tick_ = 0;
+
+    base_entries_.clear();
+    display_entries_.clear();
+    sort_column_ = SortColumn::Name;
+    sort_direction_ = SortDirection::Ascending;
+
+    ApplyColumnMode();
+    UpdateSortIndicators();
+    UpdateItemCountAndRefresh(true);
+    SetLoadingState(true);
+    PostStatusUpdate();
+}
+
+void FileListView::AppendSearchResults(std::vector<FileEntry> entries) {
+    if (!search_mode_ || entries.empty()) {
+        return;
+    }
+
+    for (FileEntry& entry : entries) {
+        if (entry.full_path.empty()) {
+            entry.full_path = BuildFullPath(entry);
+        }
+        if (!entry.is_folder && entry.extension.empty()) {
+            entry.extension = GetExtensionFromName(entry.name);
+        }
+        base_entries_.push_back(std::move(entry));
+    }
+
+    SortBaseEntries();
+    BuildDisplayEntriesWithGroups();
+
+    const bool set_default_focus = FocusedIndex() < 0;
+    UpdateItemCountAndRefresh(set_default_focus);
+    PostStatusUpdate();
+}
+
+void FileListView::SetSearchElapsedMs(ULONGLONG elapsed_ms) {
+    search_elapsed_ms_ = elapsed_ms;
+    if (search_mode_) {
+        PostStatusUpdate();
+    }
+}
+
+void FileListView::CompleteSearch() {
+    if (!search_mode_) {
+        return;
+    }
+
+    SetLoadingState(false);
+    pending_incremental_refresh_ = false;
+    PostStatusUpdate();
+}
+
+void FileListView::LeaveSearchMode() {
+    if (!search_mode_) {
+        return;
+    }
+
+    search_mode_ = false;
+    search_root_path_.clear();
+    search_pattern_.clear();
+    search_elapsed_ms_ = 0;
+    if (sort_column_ == SortColumn::Path) {
+        sort_column_ = SortColumn::Name;
+        sort_direction_ = SortDirection::Ascending;
+    }
+    SetLoadingState(false);
+    ApplyColumnMode();
+    UpdateSortIndicators();
+}
+
+bool FileListView::IsSearchMode() const noexcept {
+    return search_mode_;
+}
+
+bool FileListView::CaptureSearchSnapshot(SearchSnapshot* snapshot) const {
+    if (snapshot == nullptr || !search_mode_) {
+        return false;
+    }
+
+    snapshot->root_path = search_root_path_;
+    snapshot->pattern = search_pattern_;
+    snapshot->elapsed_ms = search_elapsed_ms_;
+    snapshot->entries = base_entries_;
+    snapshot->sort_column = sort_column_;
+    snapshot->sort_direction = sort_direction_;
+    return true;
+}
+
+bool FileListView::RestoreSearchSnapshot(const SearchSnapshot& snapshot) {
+    if (snapshot.root_path.empty()) {
+        return false;
+    }
+
+    search_mode_ = true;
+    search_root_path_ = NormalizePath(snapshot.root_path);
+    search_pattern_ = snapshot.pattern;
+    search_elapsed_ms_ = snapshot.elapsed_ms;
+    current_path_ = search_root_path_;
+    pending_incremental_refresh_ = false;
+    post_load_selection_name_.clear();
+    type_ahead_buffer_.clear();
+    type_ahead_last_tick_ = 0;
+
+    base_entries_ = snapshot.entries;
+    sort_column_ = snapshot.sort_column;
+    sort_direction_ = snapshot.sort_direction;
+
+    ApplyColumnMode();
+    SortBaseEntries();
+    BuildDisplayEntriesWithGroups();
+    UpdateSortIndicators();
+    UpdateItemCountAndRefresh(true);
+    SetLoadingState(false);
+    PostStatusUpdate();
+    return true;
 }
 
 bool FileListView::LoadFolder(const std::wstring& path) {
@@ -439,6 +575,7 @@ void FileListView::CreateColumns() {
         {L"Extension", 60, LVCFMT_LEFT},
         {L"Date Modified", 140, LVCFMT_LEFT},
         {L"Size", 90, LVCFMT_RIGHT},
+        {L"Path", 0, LVCFMT_LEFT},
     };
 
     for (int i = 0; i < static_cast<int>(std::size(columns)); ++i) {
@@ -464,10 +601,20 @@ void FileListView::ApplyScaledColumns() {
         MulDiv(60, static_cast<int>(dpi_), 96),
         MulDiv(140, static_cast<int>(dpi_), 96),
         MulDiv(90, static_cast<int>(dpi_), 96),
+        search_mode_ ? MulDiv(320, static_cast<int>(dpi_), 96) : 0,
     };
     for (int i = 0; i < static_cast<int>(std::size(widths)); ++i) {
         ListView_SetColumnWidth(hwnd_, i, widths[i]);
     }
+}
+
+void FileListView::ApplyColumnMode() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+
+    ApplyScaledColumns();
+    InvalidateRect(hwnd_, nullptr, TRUE);
 }
 
 void FileListView::ApplyHeaderVisualStyle() {
@@ -559,6 +706,9 @@ bool FileListView::HandleGetDispInfo(NMLVDISPINFOW* info) const {
             case 3:
                 text = entry.is_folder ? L"" : FormatFileSize(entry.size_bytes);
                 break;
+            case 4:
+                text = entry.full_path;
+                break;
             default:
                 text.clear();
                 break;
@@ -575,7 +725,8 @@ bool FileListView::HandleGetDispInfo(NMLVDISPINFOW* info) const {
 }
 
 bool FileListView::HandleColumnClick(int column_index) {
-    if (column_index < 0 || column_index > 3) {
+    const int max_column_index = search_mode_ ? 4 : 3;
+    if (column_index < 0 || column_index > max_column_index) {
         return false;
     }
 
@@ -1049,6 +1200,13 @@ void FileListView::SortBaseEntries() {
                 cmp = CompareTextInsensitive(left.name, right.name);
             }
             break;
+
+        case SortColumn::Path:
+            cmp = CompareTextInsensitive(left.full_path, right.full_path);
+            if (cmp == 0) {
+                cmp = CompareTextInsensitive(left.name, right.name);
+            }
+            break;
         }
 
         if (sort_direction_ == SortDirection::Ascending) {
@@ -1066,7 +1224,7 @@ void FileListView::BuildDisplayEntriesWithGroups() {
         return;
     }
 
-    if (sort_column_ != SortColumn::DateModified) {
+    if (search_mode_ || sort_column_ != SortColumn::DateModified) {
         display_entries_ = base_entries_;
         return;
     }
@@ -1098,8 +1256,12 @@ void FileListView::UpdateSortIndicators() {
         return;
     }
 
-    const int active_index = static_cast<int>(sort_column_);
-    for (int i = 0; i < 4; ++i) {
+    const int column_count = Header_GetItemCount(header);
+    const int max_sort_index = search_mode_ ? 4 : 3;
+    const int raw_active_index = static_cast<int>(sort_column_);
+    const int active_index = (raw_active_index >= 0 && raw_active_index <= max_sort_index) ? raw_active_index : -1;
+
+    for (int i = 0; i < column_count; ++i) {
         HDITEMW item = {};
         item.mask = HDI_FORMAT;
         if (!Header_GetItem(header, i, &item)) {
@@ -1159,8 +1321,33 @@ std::wstring FileListView::BuildStatusText() const {
     const int total_items = static_cast<int>(base_entries_.size());
     const int selected_items = SelectedCountExcludingDividers();
 
-    wchar_t buffer[160] = {};
-    if (loading_) {
+    wchar_t buffer[384] = {};
+    if (search_mode_) {
+        if (loading_) {
+            swprintf_s(
+                buffer,
+                L"Searching \"%s\" in %s...    Results: %d    Selected: %d",
+                search_pattern_.c_str(),
+                search_root_path_.c_str(),
+                total_items,
+                selected_items);
+        } else {
+            if (search_elapsed_ms_ > 0) {
+                swprintf_s(
+                    buffer,
+                    L"Search results: %d    Selected: %d    Time: %llu ms",
+                    total_items,
+                    selected_items,
+                    search_elapsed_ms_);
+            } else {
+                swprintf_s(
+                    buffer,
+                    L"Search results: %d    Selected: %d",
+                    total_items,
+                    selected_items);
+            }
+        }
+    } else if (loading_) {
         swprintf_s(buffer, L"Loading...    Items: %d    Selected: %d", total_items, selected_items);
     } else {
         swprintf_s(buffer, L"Items: %d    Selected: %d", total_items, selected_items);
@@ -1608,6 +1795,9 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
     AppendMenuW(menu, MF_STRING, kMenuDelete, L"Delete");
     AppendMenuW(menu, MF_STRING, kMenuProperties, L"Properties");
     AppendMenuW(menu, MF_STRING, kMenuCopyPath, L"Copy Path");
+    if (search_mode_) {
+        AppendMenuW(menu, MF_STRING, kMenuOpenFileLocation, L"Open file location");
+    }
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuMakeFavourite, L"Make Favourite");
     AppendMenuW(menu, MF_STRING, kMenuMakeFlyoutFavourite, L"Make Flyout Favourite");
@@ -1629,6 +1819,19 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
         EnableMenuItem(menu, kMenuDelete, disable_flags);
         EnableMenuItem(menu, kMenuProperties, disable_flags);
         EnableMenuItem(menu, kMenuCopyPath, disable_flags);
+        if (search_mode_) {
+            EnableMenuItem(menu, kMenuOpenFileLocation, disable_flags);
+        }
+        EnableMenuItem(menu, kMenuMakeFavourite, disable_flags);
+        EnableMenuItem(menu, kMenuMakeFlyoutFavourite, disable_flags);
+    } else if (!search_mode_ || display_entries_[target_index].is_folder) {
+        if (search_mode_) {
+            EnableMenuItem(menu, kMenuOpenFileLocation, MF_BYCOMMAND | MF_GRAYED);
+        }
+    }
+
+    if (has_target && !display_entries_[target_index].is_folder) {
+        const UINT disable_flags = MF_BYCOMMAND | MF_GRAYED;
         EnableMenuItem(menu, kMenuMakeFavourite, disable_flags);
         EnableMenuItem(menu, kMenuMakeFlyoutFavourite, disable_flags);
     }
@@ -1648,6 +1851,53 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
         switch (command) {
         case kMenuCopyPath:
             CopyTextToClipboard(parent_hwnd_, full_path);
+            break;
+
+        case kMenuOpenFileLocation: {
+            const std::wstring containing_folder = ParentPath(full_path);
+            if (!containing_folder.empty()) {
+                auto payload = std::make_unique<std::wstring>(containing_folder);
+                if (!PostMessageW(
+                        parent_hwnd_,
+                        WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB,
+                        0,
+                        reinterpret_cast<LPARAM>(payload.get()))) {
+                    LogLastError(L"PostMessageW(WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB)");
+                } else {
+                    payload.release();
+                }
+            }
+            break;
+        }
+
+        case kMenuMakeFavourite:
+            if (entry.is_folder) {
+                auto payload = std::make_unique<std::wstring>(full_path);
+                if (!PostMessageW(
+                        parent_hwnd_,
+                        WM_FE_FILELIST_ADD_REGULAR_FAVOURITE,
+                        0,
+                        reinterpret_cast<LPARAM>(payload.get()))) {
+                    LogLastError(L"PostMessageW(WM_FE_FILELIST_ADD_REGULAR_FAVOURITE)");
+                } else {
+                    payload.release();
+                }
+            }
+            break;
+
+        case kMenuMakeFlyoutFavourite:
+            if (entry.is_folder) {
+                auto payload = std::make_unique<std::wstring>(full_path);
+                if (!PostMessageW(
+                        parent_hwnd_,
+                        WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE,
+                        0,
+                        reinterpret_cast<LPARAM>(payload.get()))) {
+                    LogLastError(L"PostMessageW(WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE)");
+                } else {
+                    payload.release();
+                }
+            }
             break;
 
         case kMenuProperties:
@@ -1676,7 +1926,12 @@ void FileListView::DrawEmptyState(HDC hdc) const {
         return;
     }
 
-    const wchar_t* text = L"This folder is empty";
+    std::wstring text = L"This folder is empty";
+    if (search_mode_) {
+        text = L"No files found matching \"";
+        text.append(search_pattern_);
+        text.push_back(L'"');
+    }
     RECT text_rect = client_rect;
     text_rect.top += MulDiv(36, static_cast<int>(dpi_), 96);
 
@@ -1696,10 +1951,14 @@ void FileListView::DrawEmptyState(HDC hdc) const {
 
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, kEmptyStateTextColor);
-    DrawTextW(hdc, text, -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, text.c_str(), -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 }
 
 std::wstring FileListView::BuildFullPath(const FileEntry& entry) const {
+    if (!entry.full_path.empty()) {
+        return entry.full_path;
+    }
+
     std::wstring result = current_path_;
     if (result.empty()) {
         return entry.name;

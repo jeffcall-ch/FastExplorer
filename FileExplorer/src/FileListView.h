@@ -17,12 +17,16 @@ namespace fileexplorer {
 constexpr UINT WM_FE_FILELIST_NAVIGATE = WM_APP + 103;
 constexpr UINT WM_FE_FILELIST_STATUS_UPDATE = WM_APP + 104;
 constexpr UINT WM_FE_FILELIST_REFRESH = WM_APP + 105;
+constexpr UINT WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB = WM_APP + 109;
+constexpr UINT WM_FE_FILELIST_ADD_REGULAR_FAVOURITE = WM_APP + 110;
+constexpr UINT WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE = WM_APP + 111;
 
 enum class SortColumn {
     Name = 0,
     Extension = 1,
     DateModified = 2,
     Size = 3,
+    Path = 4,
 };
 
 enum class SortDirection {
@@ -33,6 +37,7 @@ enum class SortDirection {
 struct FileEntry {
     std::wstring name;
     std::wstring extension;
+    std::wstring full_path;
     FILETIME modified_time{};
     ULONGLONG size_bytes = 0;
     DWORD attributes = 0;
@@ -45,6 +50,15 @@ struct FileEntry {
 
 class FileListView final {
 public:
+    struct SearchSnapshot {
+        std::wstring root_path;
+        std::wstring pattern;
+        ULONGLONG elapsed_ms = 0;
+        std::vector<FileEntry> entries;
+        SortColumn sort_column = SortColumn::Name;
+        SortDirection sort_direction = SortDirection::Ascending;
+    };
+
     FileListView();
     ~FileListView();
 
@@ -58,6 +72,14 @@ public:
 
     void BeginFolderLoad(const std::wstring& path, bool incremental_refresh);
     void ApplyLoadedFolderEntries(std::vector<FileEntry> entries, bool incremental_refresh);
+    void BeginSearch(const std::wstring& root_path, const std::wstring& pattern);
+    void AppendSearchResults(std::vector<FileEntry> entries);
+    void SetSearchElapsedMs(ULONGLONG elapsed_ms);
+    void CompleteSearch();
+    void LeaveSearchMode();
+    bool IsSearchMode() const noexcept;
+    bool CaptureSearchSnapshot(SearchSnapshot* snapshot) const;
+    bool RestoreSearchSnapshot(const SearchSnapshot& snapshot);
 
     bool LoadFolder(const std::wstring& path);
     const std::wstring& current_path() const noexcept;
@@ -90,6 +112,7 @@ private:
     bool CreateListViewControl();
     void CreateColumns();
     void ApplyScaledColumns();
+    void ApplyColumnMode();
     void ApplyHeaderVisualStyle();
     void EnsureSystemImageList();
     void EnsureDividerFont();
@@ -171,6 +194,10 @@ private:
     bool pending_incremental_refresh_{false};
     int loading_frame_{0};
     std::wstring post_load_selection_name_{};
+    bool search_mode_{false};
+    std::wstring search_root_path_{};
+    std::wstring search_pattern_{};
+    ULONGLONG search_elapsed_ms_{0};
 };
 
 }  // namespace fileexplorer

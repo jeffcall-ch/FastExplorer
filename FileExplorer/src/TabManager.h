@@ -1,11 +1,13 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace fileexplorer {
 
 struct TabState {
+    uint64_t id = 0;
     std::wstring path;
     std::wstring displayName;
     bool pinned = false;
@@ -55,6 +57,7 @@ private:
 
     std::vector<TabState> tabs_;
     int active_index_{0};
+    uint64_t next_tab_id_{1};
 };
 
 }  // namespace fileexplorer

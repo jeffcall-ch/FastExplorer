@@ -78,7 +78,14 @@ namespace fileexplorer {
 TabManager::TabManager() {
     const int initial_index = AddTab(DefaultTabPath(), true, false);
     if (initial_index < 0) {
-        tabs_.push_back(TabState{L"C:\\", L"C:", false, {L"C:\\"}, 0});
+        TabState fallback = {};
+        fallback.id = next_tab_id_++;
+        fallback.path = L"C:\\";
+        fallback.displayName = L"C:";
+        fallback.pinned = false;
+        fallback.history = {L"C:\\"};
+        fallback.historyIndex = 0;
+        tabs_.push_back(std::move(fallback));
         active_index_ = 0;
     }
 }
@@ -105,6 +112,7 @@ int TabManager::AddTab(const std::wstring& path, bool activate, bool pinned) {
     }
 
     TabState state = {};
+    state.id = next_tab_id_++;
     state.path = normalized_path;
     state.displayName = BuildDisplayName(normalized_path);
     state.pinned = pinned;
@@ -240,7 +248,15 @@ bool TabManager::CloseTabsToRight(int index) {
     }
 
     if (tabs_.empty()) {
-        tabs_.push_back(TabState{DefaultTabPath(), BuildDisplayName(DefaultTabPath()), false, {DefaultTabPath()}, 0});
+        const std::wstring default_path = DefaultTabPath();
+        TabState fallback = {};
+        fallback.id = next_tab_id_++;
+        fallback.path = default_path;
+        fallback.displayName = BuildDisplayName(default_path);
+        fallback.pinned = false;
+        fallback.history = {default_path};
+        fallback.historyIndex = 0;
+        tabs_.push_back(std::move(fallback));
     }
 
     active_index_ = std::clamp(active_index_, 0, static_cast<int>(tabs_.size()) - 1);
@@ -261,6 +277,7 @@ bool TabManager::DuplicateTab(int index) {
     }
 
     TabState duplicated = tabs_[index];
+    duplicated.id = next_tab_id_++;
     duplicated.pinned = false;
 
     const int insert_index = index + 1;
