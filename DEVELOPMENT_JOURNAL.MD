@@ -24,9 +24,9 @@ Rule: Decisions must be explained, not just stated.
 ```text
 Last updated:      2026-04-21 by assistant
 Current phase:     Phase 10 - Visual Polish
-Current target:    CP-10 (in progress - incremental step 10 complete + tab-search textbox restore fix)
+Current target:    CP-10 (in progress - incremental step 11 complete + search/tab UX fixes + pane/layout persistence fixes)
 Last checkpoint:   CP-09 - PASS
-Build status:      PASS - Debug x64 solution build succeeds after tab-search textbox restore fix
+Build status:      PASS - Debug x64 solution build succeeds after file-list column width persistence implementation
 Tests status:      PASS - FileExplorer.Tests.exe runs and passes (21 tests, 0 failures)
 Blockers:          None
 ```
@@ -47,7 +47,7 @@ Blockers:          None
 | 7 | Search Engine | Complete | CP-07 | Completed on 2026-04-18 (user-confirmed CP-07 interactive verification complete) |
 | 8 | Favourites System | Complete | CP-08 | Completed on 2026-04-19 (user-confirmed verification complete, persistence + async flyouts validated) |
 | 9 | File Operations | Complete | CP-09 | Completed on 2026-04-21 (user-confirmed interactive verification complete) |
-| 10 | Visual Polish | In progress | CP-10 | Incremental steps 1+2+3+4+5+6+7+8+9+10 done; Ctrl+T/Ctrl+W tab shortcut routing fixed |
+| 10 | Visual Polish | In progress | CP-10 | Incremental steps 1+2+3+4+5+6+7+8+9+10 done; Ctrl+T/Ctrl+W tab shortcut routing fixed; sidebar splitter + file-list column width persistence fixes applied |
 | 11 | Settings & Persistence | Not started | CP-11 | |
 | 12 | Single Instance | Not started | CP-12 | |
 | 13 | Unit Tests | Not started | CP-13 | |
@@ -436,11 +436,90 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** Keep status-bar text as the only search-context hint (rejected: insufficient discoverability), rerun search on tab return to repopulate text (rejected: unnecessary work and potential latency).  
 **Status:** Closed  
 
+### AD-061 - 2026-04-21 - Phase 10 Incremental Step 11: Empty-State MDL2 Icon Rendering
+**Decision:** Update empty-state rendering to draw folder-outline glyph `U+E8B7` from `Segoe MDL2 Assets` at a larger visual size, with shell-icon fallback if font creation fails.  
+**Rationale:** Aligns empty-state visual language with plan guidance while preserving robustness across environments where MDL2 font creation might fail.  
+**Alternatives considered:** Keep shell icon only (rejected: less aligned to intended polished empty-state design).  
+**Status:** Closed  
+
+### AD-062 - 2026-04-21 - Draggable Sidebar Splitter + Persisted Width
+**Decision:** Implement a dedicated `FE_SidebarSplitter` child control in `MainWindow` to handle left/right drag resizing of the right pane, and persist the chosen width via `Settings` (`settings.ini` `General.SidebarWidth`) with portable-first path resolution.  
+**Rationale:** User reported that right-pane width was fixed and not session-persistent; phase plan requires pane width persistence and interactive resize behavior.  
+**Alternatives considered:** Continue fixed `metrics_.sidebarWidth` only (rejected: fails usability expectation), parent-only hit-testing resize without a splitter child (rejected: unreliable because boundary pixels are owned by child controls).  
+**Status:** Closed  
+
+### AD-063 - 2026-04-21 - Persist File-List Column Widths in settings.ini
+**Decision:** Persist list-view column widths (`Name`, `Extension`, `Date Modified`, `Size`, `Path`) in `settings.ini` and restore them at startup; keep widths DPI-logical and reapply through `FileListView` column-mode logic.  
+**Rationale:** User requested that manually resized column widths survive session restart instead of resetting to hardcoded defaults.  
+**Alternatives considered:** Keep transient widths only in-memory (rejected: does not survive restart), persist raw pixel widths only (rejected: weaker DPI behavior).  
+**Status:** Closed  
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 058 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (targeted persistence follow-up)  
+**Goal for this session:** Persist details-pane column widths between app sessions.  
+**Completed:**  
+- Added file-list column width persistence fields to `Settings::Values` and wrote/loaded them via `settings.ini` (`General.FileList*Width` keys).  
+- Updated `FileListView` to own logical column width state, apply DPI-scaled widths from that state, and capture user resize changes from header notifications.  
+- Wired `MainWindow` startup/shutdown layout settings flow to restore and persist the file-list column widths alongside sidebar width.  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- CP-10 final consolidated visual verification/sign-off still pending.  
+**Decisions made:** AD-063  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (column width persistence implemented)  
+**Next session should start with:**  
+- User verifies: resize one or more details columns, restart app, confirm widths restore exactly.
+
+### Session 057 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (targeted usability + persistence bugfix)  
+**Goal for this session:** Make the right pane width adjustable by drag and remember the chosen width between sessions.  
+**Completed:**  
+- Added `Settings` implementation for `settings.ini` (`General.SidebarWidth`) with portable-first storage path resolution (`exe` directory, fallback `%APPDATA%\\FileExplorer`).  
+- Added a dedicated `FE_SidebarSplitter` child control and drag handling (`WM_LBUTTONDOWN`/`WM_MOUSEMOVE`/`WM_LBUTTONUP`) to resize the right pane live.  
+- Wired `MainWindow` to load saved sidebar width during startup and save it on drag release/exit.  
+- Replaced fixed sidebar width layout usage with persisted DPI-aware width (`sidebar_width_logical_` -> pixel clamp per current client size).  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- CP-10 final consolidated visual verification/sign-off still pending.  
+**Decisions made:** AD-062  
+**Errors encountered and resolved:**  
+- `msbuild` not on `PATH`; resolved by building with explicit Visual Studio 18 MSBuild path.  
+- `LNK1168` due to running `FileExplorer.exe`; resolved by terminating process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (targeted sidebar resize/persistence bugfix complete)  
+**Next session should start with:**  
+- User verifies splitter drag behavior and confirms width persists across app restart.
+
+### Session 056 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental step 11)  
+**Goal for this session:** Continue CP-10 by aligning empty-state iconography with planned Windows icon language.  
+**Completed:**  
+- Updated `FileListView::DrawEmptyState` to render `Segoe MDL2 Assets` folder-outline glyph (`U+E8B7`) as the primary empty-state icon.  
+- Added fallback to previous shell folder icon path if MDL2 font creation is unavailable.  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- CP-10 final consolidated visual verification/sign-off still pending.  
+**Decisions made:** AD-061  
+**Errors encountered and resolved:**  
+- `LNK1168` due to running `FileExplorer.exe`; resolved by terminating process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 11 complete)  
+**Next session should start with:**  
+- Run final CP-10 in-app verification sweep against checklist and mark CP-10 complete if confirmed.
 
 ### Session 055 - 2026-04-21
 **Phase:** Phase 10 - Visual Polish (tab search UX refinement)  
@@ -1845,6 +1924,36 @@ Severity: Blocker | High | Low | Debt
 ---
 
 ## Test Results Log
+
+### Test Run 048 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-file-list column width persistence implementation verification run)  
+**Failures:**  
+- None
+
+### Test Run 047 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-sidebar splitter drag + settings persistence implementation verification run)  
+**Failures:**  
+- None
+
+### Test Run 046 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental step 11 empty-state iconography polish verification run)  
+**Failures:**  
+- None
 
 ### Test Run 045 - 2026-04-21
 **Configuration:** Debug x64  

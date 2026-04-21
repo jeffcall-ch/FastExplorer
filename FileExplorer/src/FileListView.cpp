@@ -57,6 +57,8 @@ constexpr UINT kShellMenuCommandFirst = 7400;
 constexpr UINT kShellMenuCommandLast = 7599;
 constexpr DWORD kTypeAheadResetMs = 1200;
 constexpr UINT kLoadingTimerMs = 80;
+constexpr int kMinColumnWidthLogical = 40;
+constexpr int kMaxColumnWidthLogical = 1800;
 
 void LogLastError(const wchar_t* context) {
     const DWORD error_code = GetLastError();
@@ -206,6 +208,25 @@ HFONT CreateUiFont(int point_size, UINT dpi, LONG weight) {
         CLEARTYPE_QUALITY,
         DEFAULT_PITCH | FF_DONTCARE,
         L"Segoe UI");
+}
+
+HFONT CreateMdl2Font(int point_size, UINT dpi, LONG weight) {
+    const int pixel_height = -MulDiv(point_size, static_cast<int>(dpi), 72);
+    return CreateFontW(
+        pixel_height,
+        0,
+        0,
+        0,
+        weight,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe MDL2 Assets");
 }
 
 }  // namespace
@@ -515,6 +536,21 @@ const std::wstring& FileListView::current_path() const noexcept {
     return current_path_;
 }
 
+void FileListView::SetColumnWidthsLogical(const ColumnWidthsLogical& widths) {
+    for (int i = 0; i < kColumnCount; ++i) {
+        column_widths_logical_[i] = ClampColumnWidthLogical(i, widths[static_cast<size_t>(i)]);
+    }
+    ApplyColumnMode();
+}
+
+FileListView::ColumnWidthsLogical FileListView::GetColumnWidthsLogical() const {
+    return column_widths_logical_;
+}
+
+FileListView::ColumnWidthsLogical FileListView::DefaultColumnWidthsLogical() {
+    return ColumnWidthsLogical{{260, 60, 140, 90, 320}};
+}
+
 bool FileListView::HandleNotify(LPARAM l_param, LRESULT* result) {
     auto* header = reinterpret_cast<NMHDR*>(l_param);
     if (header == nullptr) {
@@ -522,8 +558,18 @@ bool FileListView::HandleNotify(LPARAM l_param, LRESULT* result) {
     }
 
     HWND list_header = (hwnd_ != nullptr) ? ListView_GetHeader(hwnd_) : nullptr;
-    if (list_header != nullptr && header->hwndFrom == list_header && header->code == NM_CUSTOMDRAW) {
-        return HandleHeaderCustomDraw(reinterpret_cast<NMCUSTOMDRAW*>(l_param), result);
+    if (list_header != nullptr && header->hwndFrom == list_header) {
+        if (header->code == NM_CUSTOMDRAW) {
+            return HandleHeaderCustomDraw(reinterpret_cast<NMCUSTOMDRAW*>(l_param), result);
+        }
+
+        if (header->code == HDN_ENDTRACKA ||
+            header->code == HDN_ENDTRACKW ||
+            header->code == HDN_ITEMCHANGEDA ||
+            header->code == HDN_ITEMCHANGEDW) {
+            CaptureCurrentColumnWidths();
+            return false;
+        }
     }
 
     if (header->hwndFrom != hwnd_) {
@@ -681,21 +727,22 @@ bool FileListView::CreateListViewControl() {
 void FileListView::CreateColumns() {
     const struct ColumnSpec {
         const wchar_t* title;
-        int base_width;
         int format;
     } columns[] = {
-        {L"Name", 260, LVCFMT_LEFT},
-        {L"Extension", 60, LVCFMT_LEFT},
-        {L"Date Modified", 140, LVCFMT_LEFT},
-        {L"Size", 90, LVCFMT_RIGHT},
-        {L"Path", 0, LVCFMT_LEFT},
+        {L"Name", LVCFMT_LEFT},
+        {L"Extension", LVCFMT_LEFT},
+        {L"Date Modified", LVCFMT_LEFT},
+        {L"Size", LVCFMT_RIGHT},
+        {L"Path", LVCFMT_LEFT},
     };
 
     for (int i = 0; i < static_cast<int>(std::size(columns)); ++i) {
         LVCOLUMNW column = {};
         column.mask = LVCF_FMT | LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
         column.fmt = columns[i].format;
-        column.cx = MulDiv(columns[i].base_width, static_cast<int>(dpi_), 96);
+        const int logical_width = column_widths_logical_[static_cast<size_t>(i)];
+        const int width_px = MulDiv(logical_width, static_cast<int>(dpi_), 96);
+        column.cx = (i == 4 && !search_mode_) ? 0 : width_px;
         column.pszText = const_cast<LPWSTR>(columns[i].title);
         column.iSubItem = i;
         if (ListView_InsertColumn(hwnd_, i, &column) == -1) {
@@ -709,15 +756,11 @@ void FileListView::ApplyScaledColumns() {
         return;
     }
 
-    const int widths[] = {
-        MulDiv(260, static_cast<int>(dpi_), 96),
-        MulDiv(60, static_cast<int>(dpi_), 96),
-        MulDiv(140, static_cast<int>(dpi_), 96),
-        MulDiv(90, static_cast<int>(dpi_), 96),
-        search_mode_ ? MulDiv(320, static_cast<int>(dpi_), 96) : 0,
-    };
-    for (int i = 0; i < static_cast<int>(std::size(widths)); ++i) {
-        ListView_SetColumnWidth(hwnd_, i, widths[i]);
+    for (int i = 0; i < kColumnCount; ++i) {
+        const int logical_width = ClampColumnWidthLogical(i, column_widths_logical_[static_cast<size_t>(i)]);
+        const int width_px = MulDiv(logical_width, static_cast<int>(dpi_), 96);
+        const int applied_width = (i == 4 && !search_mode_) ? 0 : width_px;
+        ListView_SetColumnWidth(hwnd_, i, applied_width);
     }
 }
 
@@ -2731,6 +2774,26 @@ std::wstring FileListView::BuildUniqueNewFolderPath() const {
     return L"";
 }
 
+void FileListView::CaptureCurrentColumnWidths() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+
+    for (int i = 0; i < kColumnCount; ++i) {
+        if (i == 4 && !search_mode_) {
+            continue;
+        }
+
+        const int width_px = ListView_GetColumnWidth(hwnd_, i);
+        if (width_px <= 0) {
+            continue;
+        }
+
+        const int logical_width = MulDiv(width_px, 96, static_cast<int>(dpi_));
+        column_widths_logical_[static_cast<size_t>(i)] = ClampColumnWidthLogical(i, logical_width);
+    }
+}
+
 void FileListView::RequestRefresh() {
     if (parent_hwnd_ != nullptr) {
         if (!PostMessageW(parent_hwnd_, WM_FE_FILELIST_REFRESH, 0, 0)) {
@@ -2893,22 +2956,42 @@ void FileListView::DrawEmptyState(HDC hdc) const {
     const int center_x = client_rect.left + (client_width / 2);
     const int center_y = client_rect.top + (client_height / 2);
 
-    const int icon_size = MulDiv(32, static_cast<int>(dpi_), 96);
-    const int icon_y = center_y - MulDiv(54, static_cast<int>(dpi_), 96);
+    const int icon_size = MulDiv(48, static_cast<int>(dpi_), 96);
+    const int icon_y = center_y - MulDiv(62, static_cast<int>(dpi_), 96);
     const int title_top = icon_y + icon_size + MulDiv(14, static_cast<int>(dpi_), 96);
     const int subtitle_top = title_top + MulDiv(26, static_cast<int>(dpi_), 96);
 
-    SHFILEINFOW shell_info = {};
-    if (SHGetFileInfoW(
-            L"C:\\",
-            FILE_ATTRIBUTE_DIRECTORY,
-            &shell_info,
-            sizeof(shell_info),
-            SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES) != 0 &&
-        shell_info.hIcon != nullptr) {
-        const int icon_x = center_x - (icon_size / 2);
-        DrawIconEx(hdc, icon_x, icon_y, shell_info.hIcon, icon_size, icon_size, 0, nullptr, DI_NORMAL);
-        DestroyIcon(shell_info.hIcon);
+    bool drew_empty_icon = false;
+    HFONT icon_font = CreateMdl2Font(36, dpi_, FW_NORMAL);
+    if (icon_font != nullptr) {
+        HFONT old_icon_font = static_cast<HFONT>(SelectObject(hdc, icon_font));
+        const int icon_half_width = MulDiv(32, static_cast<int>(dpi_), 96);
+        RECT icon_rect = {};
+        icon_rect.left = center_x - icon_half_width;
+        icon_rect.right = center_x + icon_half_width;
+        icon_rect.top = icon_y;
+        icon_rect.bottom = icon_y + icon_size;
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, kEmptyStateTextColor);
+        DrawTextW(hdc, L"\uE8B7", -1, &icon_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        SelectObject(hdc, old_icon_font);
+        DeleteObject(icon_font);
+        drew_empty_icon = true;
+    }
+
+    if (!drew_empty_icon) {
+        SHFILEINFOW shell_info = {};
+        if (SHGetFileInfoW(
+                L"C:\\",
+                FILE_ATTRIBUTE_DIRECTORY,
+                &shell_info,
+                sizeof(shell_info),
+                SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES) != 0 &&
+            shell_info.hIcon != nullptr) {
+            const int icon_x = center_x - (icon_size / 2);
+            DrawIconEx(hdc, icon_x, icon_y, shell_info.hIcon, icon_size, icon_size, 0, nullptr, DI_NORMAL);
+            DestroyIcon(shell_info.hIcon);
+        }
     }
 
     HFONT title_font = CreateEmptyStateFont(search_empty ? 16 : 18, dpi_, FW_NORMAL);
@@ -3161,6 +3244,16 @@ COLORREF FileListView::ColorForExtension(const std::wstring& extension, bool is_
         return fileexplorer::colors::kFileText;
     }
     return CLR_INVALID;
+}
+
+int FileListView::ClampColumnWidthLogical(int column_index, int value) noexcept {
+    int min_width = kMinColumnWidthLogical;
+    if (column_index == 0) {
+        min_width = 120;
+    } else if (column_index == 4) {
+        min_width = 120;
+    }
+    return (std::max)(min_width, (std::min)(kMaxColumnWidthLogical, value));
 }
 
 FileListView::DateBucket FileListView::BucketForFileTime(const FILETIME& file_time) {

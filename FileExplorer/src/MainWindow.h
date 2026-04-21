@@ -7,6 +7,7 @@
 #include <Windows.h>
 
 #include <atomic>
+#include <array>
 #include <memory>
 #include <string>
 #include <thread>
@@ -17,6 +18,7 @@
 #include "FileListView.h"
 #include "FolderWorker.h"
 #include "NavBar.h"
+#include "Settings.h"
 #include "Sidebar.h"
 #include "TabManager.h"
 #include "TabStrip.h"
@@ -47,7 +49,9 @@ private:
     using UniqueFont = std::unique_ptr<std::remove_pointer_t<HFONT>, FontDeleter>;
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
+    static LRESULT CALLBACK SidebarSplitterProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
     LRESULT HandleMessage(UINT message, WPARAM w_param, LPARAM l_param);
+    LRESULT HandleSidebarSplitterMessage(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
 
     bool RegisterWindowClass();
     bool CreateMainWindow(int show_command);
@@ -58,6 +62,11 @@ private:
     void RecalculateLayout();
     void EnsureStatusBarFont();
     void LayoutChildZones();
+    void LoadLayoutSettings();
+    void SaveLayoutSettings() const;
+    bool ApplySidebarWidthFromPointerX(int pointer_x);
+    int EffectiveSidebarWidthPx(int client_width) const;
+    int ClampSidebarWidthPx(int requested_sidebar_width_px, int client_width) const;
     void OnDpiChanged(UINT new_dpi, RECT* suggested_rect);
     void PaintFallbackBackground(HDC hdc);
     void PaintFileListInsetGutter(HDC hdc);
@@ -85,10 +94,14 @@ private:
     HWND nav_bar_hwnd_{nullptr};
     HWND file_list_hwnd_{nullptr};
     HWND sidebar_hwnd_{nullptr};
+    HWND sidebar_splitter_hwnd_{nullptr};
     HWND status_bar_hwnd_{nullptr};
 
     UINT dpi_{96U};
     LayoutMetrics metrics_{};
+    int sidebar_width_logical_{320};
+    Settings::FileListColumnWidthsLogical file_list_column_widths_logical_{{260, 60, 140, 90, 320}};
+    bool sidebar_resize_active_{false};
 
     bool use_solid_fallback_background_{true};
 
@@ -123,6 +136,8 @@ private:
     UniqueBrush status_brush_{nullptr};
     UniqueFont status_font_{nullptr};
     int status_font_pixel_height_{0};
+
+    Settings settings_{};
 };
 
 }  // namespace fileexplorer

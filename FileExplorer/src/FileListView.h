@@ -7,6 +7,7 @@
 #include <Windows.h>
 #include <CommCtrl.h>
 
+#include <array>
 #include <memory>
 #include <string>
 #include <type_traits>
@@ -53,6 +54,9 @@ struct FileEntry {
 
 class FileListView final {
 public:
+    static constexpr int kColumnCount = 5;
+    using ColumnWidthsLogical = std::array<int, kColumnCount>;
+
     struct SearchSnapshot {
         std::wstring root_path;
         std::wstring pattern;
@@ -86,6 +90,9 @@ public:
 
     bool LoadFolder(const std::wstring& path);
     const std::wstring& current_path() const noexcept;
+    void SetColumnWidthsLogical(const ColumnWidthsLogical& widths);
+    ColumnWidthsLogical GetColumnWidthsLogical() const;
+    static ColumnWidthsLogical DefaultColumnWidthsLogical();
 
     bool HandleNotify(LPARAM l_param, LRESULT* result);
 
@@ -180,6 +187,7 @@ private:
     bool ApplyInlineRenameChange(const std::wstring& old_full_path, const std::wstring& new_name);
     bool CreateNewFolderAndBeginRename();
     std::wstring BuildUniqueNewFolderPath() const;
+    void CaptureCurrentColumnWidths();
     void RequestRefresh();
     bool AppendShellContextMenu(HMENU menu, const std::wstring& path, UINT first_id, UINT last_id);
     bool InvokeShellContextMenu(UINT command_id);
@@ -201,6 +209,7 @@ private:
     static std::wstring FormatFileSize(ULONGLONG size_bytes);
     static int ResolveIconIndex(const std::wstring& full_path, bool is_folder);
     static COLORREF ColorForExtension(const std::wstring& extension, bool is_folder);
+    static int ClampColumnWidthLogical(int column_index, int value) noexcept;
     static DateBucket BucketForFileTime(const FILETIME& file_time);
     static const wchar_t* LabelForBucket(DateBucket bucket);
 
@@ -214,6 +223,7 @@ private:
     std::wstring current_path_{};
     std::vector<FileEntry> base_entries_{};
     std::vector<FileEntry> display_entries_{};
+    ColumnWidthsLogical column_widths_logical_{DefaultColumnWidthsLogical()};
 
     SortColumn sort_column_{SortColumn::Name};
     SortDirection sort_direction_{SortDirection::Ascending};

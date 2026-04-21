@@ -16,6 +16,7 @@
 namespace {
 
 constexpr wchar_t kMainWindowClassName[] = L"FE_MainWindow";
+constexpr wchar_t kSidebarSplitterClassName[] = L"FE_SidebarSplitter";
 constexpr wchar_t kInitialWindowTitle[] = L"FileExplorer";
 
 constexpr int kDefaultClientWidth = 1200;
@@ -26,6 +27,9 @@ constexpr int kControlIdNavBar = 1002;
 constexpr int kControlIdFileList = 1003;
 constexpr int kControlIdSidebar = 1004;
 constexpr int kControlIdStatusBar = 1005;
+constexpr int kControlIdSidebarSplitter = 1006;
+
+constexpr int kMinMainPaneWidthLogical = 280;
 
 constexpr UINT_PTR kFolderRefreshDebounceTimerId = 9201;
 constexpr UINT kFolderRefreshDebounceMs = 500;
@@ -230,6 +234,26 @@ bool MainWindow::RegisterWindowClass() {
         }
     }
 
+    WNDCLASSEXW splitter_class = {};
+    splitter_class.cbSize = sizeof(splitter_class);
+    splitter_class.style = CS_HREDRAW | CS_VREDRAW;
+    splitter_class.lpfnWndProc = &MainWindow::SidebarSplitterProc;
+    splitter_class.hInstance = instance_;
+    splitter_class.hCursor = LoadCursorW(nullptr, IDC_SIZEWE);
+    if (splitter_class.hCursor == nullptr) {
+        LogLastError(L"LoadCursorW(SidebarSplitter)");
+    }
+    splitter_class.hbrBackground = nullptr;
+    splitter_class.lpszClassName = kSidebarSplitterClassName;
+
+    const ATOM splitter_class_id = RegisterClassExW(&splitter_class);
+    if (splitter_class_id == 0) {
+        if (GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+            LogLastError(L"RegisterClassExW(SidebarSplitter)");
+            return false;
+        }
+    }
+
     return true;
 }
 
@@ -305,6 +329,24 @@ bool MainWindow::InitializeChildZones() {
     sidebar_hwnd_ = sidebar_.hwnd();
     if (sidebar_hwnd_ == nullptr) {
         LogLastError(L"Sidebar hwnd");
+        return false;
+    }
+
+    sidebar_splitter_hwnd_ = CreateWindowExW(
+        child_ex_style,
+        kSidebarSplitterClassName,
+        L"",
+        WS_CHILD | WS_VISIBLE,
+        0,
+        0,
+        0,
+        0,
+        hwnd_,
+        reinterpret_cast<HMENU>(static_cast<INT_PTR>(kControlIdSidebarSplitter)),
+        instance_,
+        this);
+    if (sidebar_splitter_hwnd_ == nullptr) {
+        LogLastError(L"CreateWindowExW(SidebarSplitter)");
         return false;
     }
 
@@ -391,6 +433,71 @@ void MainWindow::RecalculateLayout() {
     metrics_ = ScaleLayoutMetrics(dpi_);
 }
 
+void MainWindow::LoadLayoutSettings() {
+    Settings::Values values = {};
+    values.sidebar_width_logical = sidebar_width_logical_;
+    values.file_list_column_widths_logical = file_list_column_widths_logical_;
+    if (!settings_.Load(&values)) {
+        return;
+    }
+    sidebar_width_logical_ = Settings::ClampSidebarWidthLogical(values.sidebar_width_logical);
+    file_list_column_widths_logical_ = values.file_list_column_widths_logical;
+}
+
+void MainWindow::SaveLayoutSettings() const {
+    Settings::Values values = {};
+    values.sidebar_width_logical = Settings::ClampSidebarWidthLogical(sidebar_width_logical_);
+    values.file_list_column_widths_logical =
+        (file_list_hwnd_ != nullptr)
+        ? file_list_view_.GetColumnWidthsLogical()
+        : file_list_column_widths_logical_;
+    settings_.Save(values);
+}
+
+bool MainWindow::ApplySidebarWidthFromPointerX(int pointer_x) {
+    if (hwnd_ == nullptr) {
+        return false;
+    }
+
+    RECT client_rect = {};
+    if (!GetClientRect(hwnd_, &client_rect)) {
+        LogLastError(L"GetClientRect(ApplySidebarWidthFromPointerX)");
+        return false;
+    }
+
+    const int client_width = std::max(0, static_cast<int>(client_rect.right - client_rect.left));
+    const int requested_sidebar_width = client_width - pointer_x;
+    const int clamped_sidebar_width = ClampSidebarWidthPx(requested_sidebar_width, client_width);
+    const int logical_sidebar_width = Settings::ClampSidebarWidthLogical(
+        MulDiv(clamped_sidebar_width, 96, static_cast<int>(dpi_)));
+
+    if (logical_sidebar_width == sidebar_width_logical_) {
+        return false;
+    }
+
+    sidebar_width_logical_ = logical_sidebar_width;
+    LayoutChildZones();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+    return true;
+}
+
+int MainWindow::EffectiveSidebarWidthPx(int client_width) const {
+    const int requested_sidebar_width = MulDiv(sidebar_width_logical_, static_cast<int>(dpi_), 96);
+    return ClampSidebarWidthPx(requested_sidebar_width, client_width);
+}
+
+int MainWindow::ClampSidebarWidthPx(int requested_sidebar_width_px, int client_width) const {
+    if (client_width <= 0) {
+        return 0;
+    }
+
+    const int min_sidebar_width = std::min(MulDiv(180, static_cast<int>(dpi_), 96), client_width);
+    const int min_main_width = std::min(MulDiv(kMinMainPaneWidthLogical, static_cast<int>(dpi_), 96), client_width);
+    const int max_sidebar_width = std::max(min_sidebar_width, client_width - min_main_width);
+
+    return (std::max)(min_sidebar_width, (std::min)(max_sidebar_width, requested_sidebar_width_px));
+}
+
 void MainWindow::EnsureStatusBarFont() {
     const int requested_pixel_height = -MulDiv(11, static_cast<int>(dpi_), 72);
     if (status_font_ != nullptr && status_font_pixel_height_ == requested_pixel_height) {
@@ -448,6 +555,7 @@ void MainWindow::LayoutChildZones() {
         nav_bar_hwnd_ == nullptr ||
         file_list_hwnd_ == nullptr ||
         sidebar_hwnd_ == nullptr ||
+        sidebar_splitter_hwnd_ == nullptr ||
         status_bar_hwnd_ == nullptr) {
         return;
     }
@@ -470,11 +578,13 @@ void MainWindow::LayoutChildZones() {
     const int content_bottom = client_height - status_height;
     const int content_height = std::max(0, content_bottom - content_top);
 
-    const int sidebar_width = std::min(metrics_.sidebarWidth, client_width);
+    const int sidebar_width = EffectiveSidebarWidthPx(client_width);
     const int file_list_width = std::max(0, client_width - sidebar_width);
     const int list_left_inset = MulDiv(10, static_cast<int>(dpi_), 96);
     const int file_list_x = (std::min)(list_left_inset, file_list_width);
     const int file_list_visible_width = (std::max)(0, file_list_width - file_list_x);
+    const int splitter_width = (std::max)(1, metrics_.sidebarResizeGripWidth);
+    const int splitter_x = (std::max)(0, file_list_width - (splitter_width / 2));
 
     if (!MoveWindow(tab_strip_hwnd_, 0, 0, client_width, tab_height, TRUE)) {
         LogLastError(L"MoveWindow(TabStrip)");
@@ -487,6 +597,18 @@ void MainWindow::LayoutChildZones() {
     }
     if (!MoveWindow(sidebar_hwnd_, file_list_width, content_top, sidebar_width, content_height, TRUE)) {
         LogLastError(L"MoveWindow(SidebarZone)");
+    }
+    if (!MoveWindow(sidebar_splitter_hwnd_, splitter_x, content_top, splitter_width, content_height, TRUE)) {
+        LogLastError(L"MoveWindow(SidebarSplitter)");
+    } else if (!SetWindowPos(
+                   sidebar_splitter_hwnd_,
+                   HWND_TOP,
+                   splitter_x,
+                   content_top,
+                   splitter_width,
+                   content_height,
+                   SWP_NOACTIVATE | SWP_SHOWWINDOW)) {
+        LogLastError(L"SetWindowPos(SidebarSplitter)");
     }
     if (!MoveWindow(status_bar_hwnd_, 0, client_height - status_height, client_width, status_height, TRUE)) {
         LogLastError(L"MoveWindow(StatusBarZone)");
@@ -561,7 +683,7 @@ void MainWindow::PaintFileListInsetGutter(HDC hdc) {
     const int content_top = tab_height + nav_height;
     const int content_bottom = client_height - status_height;
 
-    const int sidebar_width = std::min(metrics_.sidebarWidth, client_width);
+    const int sidebar_width = EffectiveSidebarWidthPx(client_width);
     const int file_list_width = std::max(0, client_width - sidebar_width);
     const int list_left_inset = MulDiv(10, static_cast<int>(dpi_), 96);
     const int file_list_x = (std::min)(list_left_inset, file_list_width);
@@ -985,6 +1107,134 @@ LRESULT CALLBACK MainWindow::WindowProc(HWND hwnd, UINT message, WPARAM w_param,
     return DefWindowProcW(hwnd, message, w_param, l_param);
 }
 
+LRESULT CALLBACK MainWindow::SidebarSplitterProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param) {
+    MainWindow* self = nullptr;
+    if (message == WM_NCCREATE) {
+        auto* create_struct = reinterpret_cast<CREATESTRUCTW*>(l_param);
+        self = reinterpret_cast<MainWindow*>(create_struct->lpCreateParams);
+        if (self == nullptr) {
+            return FALSE;
+        }
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(self));
+    } else {
+        self = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    }
+
+    if (self != nullptr) {
+        return self->HandleSidebarSplitterMessage(hwnd, message, w_param, l_param);
+    }
+
+    return DefWindowProcW(hwnd, message, w_param, l_param);
+}
+
+LRESULT MainWindow::HandleSidebarSplitterMessage(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param) {
+    switch (message) {
+    case WM_SETCURSOR: {
+        HCURSOR cursor = LoadCursorW(nullptr, IDC_SIZEWE);
+        if (cursor != nullptr) {
+            SetCursor(cursor);
+            return TRUE;
+        }
+        LogLastError(L"LoadCursorW(SidebarSplitter WM_SETCURSOR)");
+        return FALSE;
+    }
+
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT: {
+        PAINTSTRUCT paint_struct = {};
+        HDC hdc = BeginPaint(hwnd, &paint_struct);
+        if (hdc != nullptr) {
+            RECT rect = {};
+            if (GetClientRect(hwnd, &rect)) {
+                HBRUSH brush = CreateSolidBrush(fileexplorer::colors::kSeparatorSubtle);
+                if (brush != nullptr) {
+                    FillRect(hdc, &rect, brush);
+                    DeleteObject(brush);
+                }
+            } else {
+                LogLastError(L"GetClientRect(SidebarSplitter WM_PAINT)");
+            }
+        }
+        EndPaint(hwnd, &paint_struct);
+        return 0;
+    }
+
+    case WM_LBUTTONDOWN: {
+        sidebar_resize_active_ = true;
+        SetCapture(hwnd);
+
+        POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+        if (!ClientToScreen(hwnd, &point)) {
+            LogLastError(L"ClientToScreen(SidebarSplitter WM_LBUTTONDOWN)");
+            return 0;
+        }
+        if (!ScreenToClient(hwnd_, &point)) {
+            LogLastError(L"ScreenToClient(SidebarSplitter WM_LBUTTONDOWN)");
+            return 0;
+        }
+        ApplySidebarWidthFromPointerX(point.x);
+        return 0;
+    }
+
+    case WM_MOUSEMOVE:
+        if (sidebar_resize_active_) {
+            POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+            if (!ClientToScreen(hwnd, &point)) {
+                LogLastError(L"ClientToScreen(SidebarSplitter WM_MOUSEMOVE)");
+                return 0;
+            }
+            if (!ScreenToClient(hwnd_, &point)) {
+                LogLastError(L"ScreenToClient(SidebarSplitter WM_MOUSEMOVE)");
+                return 0;
+            }
+            ApplySidebarWidthFromPointerX(point.x);
+        }
+        return 0;
+
+    case WM_LBUTTONUP:
+        if (sidebar_resize_active_) {
+            POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+            if (!ClientToScreen(hwnd, &point)) {
+                LogLastError(L"ClientToScreen(SidebarSplitter WM_LBUTTONUP)");
+            } else if (!ScreenToClient(hwnd_, &point)) {
+                LogLastError(L"ScreenToClient(SidebarSplitter WM_LBUTTONUP)");
+            } else {
+                ApplySidebarWidthFromPointerX(point.x);
+            }
+
+            sidebar_resize_active_ = false;
+            if (GetCapture() == hwnd) {
+                if (!ReleaseCapture()) {
+                    LogLastError(L"ReleaseCapture(SidebarSplitter)");
+                }
+            }
+            SaveLayoutSettings();
+        }
+        return 0;
+
+    case WM_CAPTURECHANGED:
+        if (sidebar_resize_active_) {
+            sidebar_resize_active_ = false;
+            SaveLayoutSettings();
+        }
+        return 0;
+
+    case WM_NCDESTROY:
+        SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+        if (hwnd == sidebar_splitter_hwnd_) {
+            sidebar_splitter_hwnd_ = nullptr;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return DefWindowProcW(hwnd, message, w_param, l_param);
+}
+
 LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
     switch (message) {
     case WM_CREATE:
@@ -993,10 +1243,12 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
             dpi_ = 96U;
         }
         RecalculateLayout();
+        LoadLayoutSettings();
         CreateZoneBrushes();
         if (!InitializeChildZones()) {
             return -1;
         }
+        file_list_view_.SetColumnWidthsLogical(file_list_column_widths_logical_);
         ApplyWindowChrome();
         UpdateWindowTitle();
         LayoutChildZones();
@@ -1437,6 +1689,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         KillTimer(hwnd_, kFolderRefreshDebounceTimerId);
         pending_debounced_refresh_ = false;
         pending_debounced_refresh_generation_ = 0;
+        SaveLayoutSettings();
         CancelSearchWorker();
         StopFolderWatcher();
         PostQuitMessage(0);
