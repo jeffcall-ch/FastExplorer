@@ -1,6 +1,9 @@
 #include "FileListView.h"
+#include "FileOps.h"
 
+#include <Objbase.h>
 #include <Shellapi.h>
+#include <ShlObj.h>
 #include <Shlwapi.h>
 #include <Windowsx.h>
 #include <strsafe.h>
@@ -21,6 +24,7 @@ constexpr UINT_PTR kLoadingTimerId = 9001;
 
 constexpr COLORREF kListBackgroundColor = RGB(0x18, 0x1C, 0x22);
 constexpr COLORREF kListTextColor = RGB(0xE2, 0xE8, 0xEF);
+constexpr COLORREF kListCutPendingTextColor = RGB(0x93, 0x9C, 0xAA);
 constexpr COLORREF kHeaderBackgroundColor = RGB(0x1F, 0x25, 0x2D);
 constexpr COLORREF kHeaderHoverBackgroundColor = RGB(0x24, 0x2B, 0x35);
 constexpr COLORREF kHeaderTextColor = RGB(0xD2, 0xDA, 0xE4);
@@ -43,6 +47,10 @@ constexpr UINT kMenuCopyPath = 7007;
 constexpr UINT kMenuMakeFavourite = 7008;
 constexpr UINT kMenuMakeFlyoutFavourite = 7009;
 constexpr UINT kMenuOpenFileLocation = 7010;
+constexpr UINT kMenuNewFolder = 7011;
+constexpr UINT_PTR kRenameEditSubclassId = 2;
+constexpr UINT kShellMenuCommandFirst = 7400;
+constexpr UINT kShellMenuCommandLast = 7599;
 constexpr DWORD kTypeAheadResetMs = 1200;
 constexpr UINT kLoadingTimerMs = 120;
 
@@ -104,48 +112,6 @@ bool StartsWithInsensitive(const std::wstring& text, const std::wstring& prefix)
                TRUE) == CSTR_EQUAL;
 }
 
-bool CopyTextToClipboard(HWND owner, const std::wstring& text) {
-    if (!OpenClipboard(owner)) {
-        LogLastError(L"OpenClipboard");
-        return false;
-    }
-
-    if (!EmptyClipboard()) {
-        LogLastError(L"EmptyClipboard");
-        CloseClipboard();
-        return false;
-    }
-
-    const size_t bytes = (text.size() + 1) * sizeof(wchar_t);
-    HGLOBAL global_handle = GlobalAlloc(GMEM_MOVEABLE, bytes);
-    if (global_handle == nullptr) {
-        LogLastError(L"GlobalAlloc(Clipboard)");
-        CloseClipboard();
-        return false;
-    }
-
-    void* destination = GlobalLock(global_handle);
-    if (destination == nullptr) {
-        LogLastError(L"GlobalLock(Clipboard)");
-        GlobalFree(global_handle);
-        CloseClipboard();
-        return false;
-    }
-
-    memcpy(destination, text.c_str(), bytes);
-    GlobalUnlock(global_handle);
-
-    if (SetClipboardData(CF_UNICODETEXT, global_handle) == nullptr) {
-        LogLastError(L"SetClipboardData");
-        GlobalFree(global_handle);
-        CloseClipboard();
-        return false;
-    }
-
-    CloseClipboard();
-    return true;
-}
-
 }  // namespace
 
 namespace fileexplorer {
@@ -159,6 +125,8 @@ void FileListView::FontDeleter::operator()(HFONT font) const noexcept {
 FileListView::FileListView() = default;
 
 FileListView::~FileListView() {
+    EndInlineRenameControl();
+    ClearShellContextMenu();
     if (hwnd_ != nullptr) {
         RemoveWindowSubclass(hwnd_, &FileListView::ListViewSubclassProc, kListViewSubclassId);
     }
@@ -530,6 +498,49 @@ LRESULT CALLBACK FileListView::ListViewSubclassProc(
     return self->HandleSubclassMessage(message, w_param, l_param);
 }
 
+LRESULT CALLBACK FileListView::RenameEditSubclassProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM w_param,
+    LPARAM l_param,
+    UINT_PTR subclass_id,
+    DWORD_PTR ref_data) {
+    (void)subclass_id;
+
+    auto* self = reinterpret_cast<FileListView*>(ref_data);
+    if (self == nullptr) {
+        return DefSubclassProc(hwnd, message, w_param, l_param);
+    }
+
+    switch (message) {
+    case WM_KEYDOWN:
+        if (w_param == VK_RETURN) {
+            if (self->CommitInlineRename()) {
+                return 0;
+            }
+            return 0;
+        }
+        if (w_param == VK_ESCAPE) {
+            self->CancelInlineRename();
+            return 0;
+        }
+        break;
+
+    case WM_KILLFOCUS:
+        self->CommitInlineRename();
+        break;
+
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, &FileListView::RenameEditSubclassProc, kRenameEditSubclassId);
+        break;
+
+    default:
+        break;
+    }
+
+    return DefSubclassProc(hwnd, message, w_param, l_param);
+}
+
 bool FileListView::CreateListViewControl() {
     constexpr DWORD style =
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS;
@@ -781,6 +792,13 @@ bool FileListView::HandleCustomDraw(NMLVCUSTOMDRAW* custom_draw, LRESULT* result
             return true;
         }
 
+        const std::wstring full_path = BuildFullPath(entry);
+        if (IsPathCutPending(full_path)) {
+            custom_draw->clrText = kListCutPendingTextColor;
+            *result = CDRF_DODEFAULT;
+            return true;
+        }
+
         const COLORREF extension_color = ColorForExtension(entry.extension, entry.is_folder);
         custom_draw->clrText = (extension_color == CLR_INVALID) ? kListTextColor : extension_color;
         *result = CDRF_DODEFAULT;
@@ -998,6 +1016,40 @@ LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM
             return 0;
         }
 
+        if (ctrl_down && (w_param == 'C' || w_param == 'c')) {
+            CopySelectionToClipboard(false, ResolveContextTargetIndex(-1));
+            return 0;
+        }
+
+        if (ctrl_down && (w_param == 'X' || w_param == 'x')) {
+            CopySelectionToClipboard(true, ResolveContextTargetIndex(-1));
+            return 0;
+        }
+
+        if (ctrl_down && (w_param == 'V' || w_param == 'v')) {
+            PasteFromClipboard();
+            return 0;
+        }
+
+        if (w_param == VK_DELETE) {
+            DeleteSelection(shift_down, ResolveContextTargetIndex(-1));
+            return 0;
+        }
+
+        if (w_param == VK_F2) {
+            BeginInlineRename(ResolveContextTargetIndex(-1));
+            return 0;
+        }
+
+        if (alt_down && w_param == VK_RETURN) {
+            const int target_index = ResolveContextTargetIndex(-1);
+            if (IsSelectableIndex(target_index)) {
+                const std::wstring target_path = BuildFullPath(display_entries_[target_index]);
+                FileOps::ShowProperties(hwnd_, target_path);
+            }
+            return 0;
+        }
+
         if (w_param == VK_UP || w_param == VK_DOWN) {
             const int step = (w_param == VK_DOWN) ? 1 : -1;
             const int fallback_start =
@@ -1154,6 +1206,8 @@ LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM
         break;
 
     case WM_NCDESTROY:
+        EndInlineRenameControl();
+        ClearShellContextMenu();
         SetLoadingState(false);
         RemoveWindowSubclass(hwnd_, &FileListView::ListViewSubclassProc, kListViewSubclassId);
         break;
@@ -1781,6 +1835,9 @@ bool FileListView::OpenEntryAtIndex(int index, bool open_files_too) {
 }
 
 void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
+    EndInlineRenameControl();
+    ClearShellContextMenu();
+
     HMENU menu = CreatePopupMenu();
     if (menu == nullptr) {
         LogLastError(L"CreatePopupMenu(FileList)");
@@ -1793,6 +1850,7 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuRename, L"Rename");
     AppendMenuW(menu, MF_STRING, kMenuDelete, L"Delete");
+    AppendMenuW(menu, MF_STRING, kMenuNewFolder, L"New Folder");
     AppendMenuW(menu, MF_STRING, kMenuProperties, L"Properties");
     AppendMenuW(menu, MF_STRING, kMenuCopyPath, L"Copy Path");
     if (search_mode_) {
@@ -1802,15 +1860,15 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
     AppendMenuW(menu, MF_STRING, kMenuMakeFavourite, L"Make Favourite");
     AppendMenuW(menu, MF_STRING, kMenuMakeFlyoutFavourite, L"Make Flyout Favourite");
 
-    int target_index = hit_index;
-    if (!IsSelectableIndex(target_index)) {
-        target_index = FocusedIndex();
-    }
-    if (!IsSelectableIndex(target_index)) {
-        target_index = FindNextSelectableIndex(-1, 1);
+    const int target_index = ResolveContextTargetIndex(hit_index);
+    const bool has_target = IsSelectableIndex(target_index);
+    const bool can_create_folder = !search_mode_ && !current_path_.empty();
+    const bool can_paste = FileOps::ClipboardHasDropFiles();
+
+    if (has_target && (ListView_GetItemState(hwnd_, target_index, LVIS_SELECTED) & LVIS_SELECTED) == 0) {
+        EnsureSingleSelectionAtIndex(target_index);
     }
 
-    const bool has_target = IsSelectableIndex(target_index);
     if (!has_target) {
         const UINT disable_flags = MF_BYCOMMAND | MF_GRAYED;
         EnableMenuItem(menu, kMenuCopy, disable_flags);
@@ -1830,6 +1888,14 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
         }
     }
 
+    if (!can_create_folder) {
+        EnableMenuItem(menu, kMenuNewFolder, MF_BYCOMMAND | MF_GRAYED);
+    }
+
+    if (!can_paste) {
+        EnableMenuItem(menu, kMenuPaste, MF_BYCOMMAND | MF_GRAYED);
+    }
+
     if (has_target && !display_entries_[target_index].is_folder) {
         const UINT disable_flags = MF_BYCOMMAND | MF_GRAYED;
         EnableMenuItem(menu, kMenuMakeFavourite, disable_flags);
@@ -1844,68 +1910,108 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
         hwnd_,
         nullptr));
 
-    if (command != 0 && has_target) {
-        const FileEntry& entry = display_entries_[target_index];
-        const std::wstring full_path = BuildFullPath(entry);
+    if (command != 0U) {
+        if (has_target) {
+            const FileEntry& entry = display_entries_[target_index];
+            const std::wstring full_path = BuildFullPath(entry);
 
-        switch (command) {
-        case kMenuCopyPath:
-            CopyTextToClipboard(parent_hwnd_, full_path);
-            break;
+            switch (command) {
+            case kMenuCopy:
+                CopySelectionToClipboard(false, target_index);
+                break;
 
-        case kMenuOpenFileLocation: {
-            const std::wstring containing_folder = ParentPath(full_path);
-            if (!containing_folder.empty()) {
-                auto payload = std::make_unique<std::wstring>(containing_folder);
-                if (!PostMessageW(
-                        parent_hwnd_,
-                        WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB,
-                        0,
-                        reinterpret_cast<LPARAM>(payload.get()))) {
-                    LogLastError(L"PostMessageW(WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB)");
-                } else {
-                    payload.release();
+            case kMenuCut:
+                CopySelectionToClipboard(true, target_index);
+                break;
+
+            case kMenuDelete:
+                DeleteSelection(false, target_index);
+                break;
+
+            case kMenuCopyPath: {
+                std::vector<int> indices = CollectSelectedSelectableIndices();
+                if (indices.empty()) {
+                    indices.push_back(target_index);
                 }
+                const std::vector<std::wstring> paths = CollectPathsForIndices(indices);
+                std::wstring text;
+                for (size_t i = 0; i < paths.size(); ++i) {
+                    if (i > 0) {
+                        text.append(L"\r\n");
+                    }
+                    text.append(paths[i]);
+                }
+                FileOps::CopyTextToClipboard(hwnd_, text);
+                break;
             }
-            break;
+
+            case kMenuOpenFileLocation: {
+                const std::wstring containing_folder = ParentPath(full_path);
+                if (!containing_folder.empty()) {
+                    auto payload = std::make_unique<std::wstring>(containing_folder);
+                    if (!PostMessageW(
+                            parent_hwnd_,
+                            WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB,
+                            0,
+                            reinterpret_cast<LPARAM>(payload.get()))) {
+                        LogLastError(L"PostMessageW(WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB)");
+                    } else {
+                        payload.release();
+                    }
+                }
+                break;
+            }
+
+            case kMenuMakeFavourite:
+                if (entry.is_folder) {
+                    auto payload = std::make_unique<std::wstring>(full_path);
+                    if (!PostMessageW(
+                            parent_hwnd_,
+                            WM_FE_FILELIST_ADD_REGULAR_FAVOURITE,
+                            0,
+                            reinterpret_cast<LPARAM>(payload.get()))) {
+                        LogLastError(L"PostMessageW(WM_FE_FILELIST_ADD_REGULAR_FAVOURITE)");
+                    } else {
+                        payload.release();
+                    }
+                }
+                break;
+
+            case kMenuMakeFlyoutFavourite:
+                if (entry.is_folder) {
+                    auto payload = std::make_unique<std::wstring>(full_path);
+                    if (!PostMessageW(
+                            parent_hwnd_,
+                            WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE,
+                            0,
+                            reinterpret_cast<LPARAM>(payload.get()))) {
+                        LogLastError(L"PostMessageW(WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE)");
+                    } else {
+                        payload.release();
+                    }
+                }
+                break;
+
+            case kMenuProperties:
+                FileOps::ShowProperties(hwnd_, full_path);
+                break;
+
+            case kMenuRename:
+                BeginInlineRename(target_index);
+                break;
+
+            default:
+                break;
+            }
         }
 
-        case kMenuMakeFavourite:
-            if (entry.is_folder) {
-                auto payload = std::make_unique<std::wstring>(full_path);
-                if (!PostMessageW(
-                        parent_hwnd_,
-                        WM_FE_FILELIST_ADD_REGULAR_FAVOURITE,
-                        0,
-                        reinterpret_cast<LPARAM>(payload.get()))) {
-                    LogLastError(L"PostMessageW(WM_FE_FILELIST_ADD_REGULAR_FAVOURITE)");
-                } else {
-                    payload.release();
-                }
-            }
+        switch (command) {
+        case kMenuPaste:
+            PasteFromClipboard();
             break;
 
-        case kMenuMakeFlyoutFavourite:
-            if (entry.is_folder) {
-                auto payload = std::make_unique<std::wstring>(full_path);
-                if (!PostMessageW(
-                        parent_hwnd_,
-                        WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE,
-                        0,
-                        reinterpret_cast<LPARAM>(payload.get()))) {
-                    LogLastError(L"PostMessageW(WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE)");
-                } else {
-                    payload.release();
-                }
-            }
-            break;
-
-        case kMenuProperties:
-            ShellExecuteW(nullptr, L"properties", full_path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            break;
-
-        case kMenuRename:
-            PostMessageW(hwnd_, WM_KEYDOWN, VK_F2, 0);
+        case kMenuNewFolder:
+            CreateNewFolderAndBeginRename();
             break;
 
         default:
@@ -1914,6 +2020,677 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
     }
 
     DestroyMenu(menu);
+    ClearShellContextMenu();
+    if (rename_edit_hwnd_ == nullptr && hwnd_ != nullptr) {
+        SetFocus(hwnd_);
+    }
+}
+
+int FileListView::ResolveContextTargetIndex(int hit_index) const {
+    if (IsSelectableIndex(hit_index)) {
+        return hit_index;
+    }
+
+    const int focused = FocusedIndex();
+    if (IsSelectableIndex(focused)) {
+        return focused;
+    }
+
+    if (hwnd_ != nullptr) {
+        int selected = -1;
+        while (true) {
+            selected = ListView_GetNextItem(hwnd_, selected, LVNI_SELECTED);
+            if (selected < 0) {
+                break;
+            }
+            if (IsSelectableIndex(selected)) {
+                return selected;
+            }
+        }
+    }
+
+    return FindNextSelectableIndex(-1, 1);
+}
+
+std::vector<int> FileListView::CollectSelectedSelectableIndices() const {
+    std::vector<int> indices;
+    if (hwnd_ == nullptr) {
+        return indices;
+    }
+
+    int index = -1;
+    while (true) {
+        index = ListView_GetNextItem(hwnd_, index, LVNI_SELECTED);
+        if (index < 0) {
+            break;
+        }
+        if (IsSelectableIndex(index)) {
+            indices.push_back(index);
+        }
+    }
+    return indices;
+}
+
+std::vector<std::wstring> FileListView::CollectPathsForIndices(const std::vector<int>& indices) const {
+    std::vector<std::wstring> paths;
+    paths.reserve(indices.size());
+    for (int index : indices) {
+        if (!IsSelectableIndex(index)) {
+            continue;
+        }
+        paths.push_back(BuildFullPath(display_entries_[index]));
+    }
+    return paths;
+}
+
+void FileListView::EnsureSingleSelectionAtIndex(int index) {
+    if (!IsSelectableIndex(index) || hwnd_ == nullptr) {
+        return;
+    }
+    ClearSelection();
+    ListView_SetItemState(
+        hwnd_,
+        index,
+        LVIS_SELECTED | LVIS_FOCUSED,
+        LVIS_SELECTED | LVIS_FOCUSED);
+    ListView_SetSelectionMark(hwnd_, index);
+    ListView_EnsureVisible(hwnd_, index, FALSE);
+    PostStatusUpdate();
+}
+
+bool FileListView::CopySelectionToClipboard(bool cut, int fallback_index) {
+    std::vector<int> indices = CollectSelectedSelectableIndices();
+    if (indices.empty() && IsSelectableIndex(fallback_index)) {
+        EnsureSingleSelectionAtIndex(fallback_index);
+        indices.push_back(fallback_index);
+    }
+    if (indices.empty()) {
+        return false;
+    }
+
+    const std::vector<std::wstring> paths = CollectPathsForIndices(indices);
+    if (!FileOps::CopyPathsToClipboard(hwnd_, paths, cut)) {
+        return false;
+    }
+
+    if (cut) {
+        SetCutPendingPaths(paths);
+    } else {
+        ClearCutPendingState();
+    }
+    return true;
+}
+
+bool FileListView::PasteFromClipboard() {
+    if (current_path_.empty()) {
+        return false;
+    }
+
+    bool was_move = false;
+    if (!FileOps::PasteFromClipboard(hwnd_, current_path_, &was_move)) {
+        return false;
+    }
+
+    if (was_move) {
+        ClearCutPendingState();
+    }
+
+    if (!search_mode_) {
+        RequestRefresh();
+    }
+    PostStatusUpdate();
+    if (hwnd_ != nullptr) {
+        SetFocus(hwnd_);
+    }
+    return true;
+}
+
+bool FileListView::DeleteSelection(bool permanent, int fallback_index) {
+    std::vector<int> indices = CollectSelectedSelectableIndices();
+    if (indices.empty() && IsSelectableIndex(fallback_index)) {
+        EnsureSingleSelectionAtIndex(fallback_index);
+        indices.push_back(fallback_index);
+    }
+    if (indices.empty()) {
+        return false;
+    }
+
+    const std::vector<std::wstring> paths = CollectPathsForIndices(indices);
+    if (paths.empty()) {
+        return false;
+    }
+
+    if (permanent) {
+        wchar_t prompt[256] = {};
+        swprintf_s(
+            prompt,
+            L"Permanently delete %zu selected item(s)?",
+            static_cast<size_t>(paths.size()));
+        if (MessageBoxW(hwnd_, prompt, L"FileExplorer", MB_ICONWARNING | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+            return false;
+        }
+    }
+
+    const bool deleted = permanent
+        ? FileOps::DeletePermanently(hwnd_, paths)
+        : FileOps::DeleteToRecycleBin(hwnd_, paths);
+    if (!deleted) {
+        return false;
+    }
+
+    RemoveCutPendingPaths(paths);
+
+    std::unordered_set<std::wstring> removed_paths;
+    removed_paths.reserve(paths.size());
+    for (const std::wstring& path : paths) {
+        removed_paths.insert(ToLowerCopy(NormalizePath(path)));
+    }
+
+    std::vector<FileEntry> filtered_entries;
+    filtered_entries.reserve(base_entries_.size());
+    for (const FileEntry& entry : base_entries_) {
+        const std::wstring normalized_entry = ToLowerCopy(NormalizePath(BuildFullPath(entry)));
+        if (removed_paths.find(normalized_entry) == removed_paths.end()) {
+            filtered_entries.push_back(entry);
+        }
+    }
+    base_entries_ = std::move(filtered_entries);
+
+    SortBaseEntries();
+    BuildDisplayEntriesWithGroups();
+    UpdateSortIndicators();
+    UpdateItemCountAndRefresh(true);
+    PostStatusUpdate();
+
+    if (!search_mode_) {
+        RequestRefresh();
+    }
+    if (hwnd_ != nullptr) {
+        SetFocus(hwnd_);
+    }
+    return true;
+}
+
+bool FileListView::BeginInlineRename(int index) {
+    if (!IsSelectableIndex(index) || hwnd_ == nullptr) {
+        return false;
+    }
+
+    EndInlineRenameControl();
+
+    RECT label_rect = {};
+    if (!ListView_GetSubItemRect(hwnd_, index, 0, LVIR_LABEL, &label_rect)) {
+        if (!ListView_GetItemRect(hwnd_, index, &label_rect, LVIR_LABEL)) {
+            return false;
+        }
+    }
+
+    const int min_height = MulDiv(24, static_cast<int>(dpi_), 96);
+    const int rect_height = static_cast<int>(label_rect.bottom - label_rect.top);
+    const int rect_width = static_cast<int>(label_rect.right - label_rect.left);
+    const int height = (std::max)(min_height, rect_height);
+    const int width = (std::max)(MulDiv(120, static_cast<int>(dpi_), 96), rect_width);
+
+    const FileEntry& entry = display_entries_[index];
+    rename_item_index_ = index;
+    rename_original_name_ = entry.name;
+    rename_original_full_path_ = BuildFullPath(entry);
+
+    rename_edit_hwnd_ = CreateWindowExW(
+        WS_EX_CLIENTEDGE,
+        WC_EDITW,
+        entry.name.c_str(),
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        label_rect.left,
+        label_rect.top,
+        width,
+        height,
+        hwnd_,
+        nullptr,
+        instance_,
+        nullptr);
+    if (rename_edit_hwnd_ == nullptr) {
+        LogLastError(L"CreateWindowExW(FileList RenameEdit)");
+        rename_item_index_ = -1;
+        rename_original_name_.clear();
+        rename_original_full_path_.clear();
+        return false;
+    }
+
+    if (!SetWindowSubclass(
+            rename_edit_hwnd_,
+            &FileListView::RenameEditSubclassProc,
+            kRenameEditSubclassId,
+            reinterpret_cast<DWORD_PTR>(this))) {
+        LogLastError(L"SetWindowSubclass(FileList RenameEdit)");
+        DestroyWindow(rename_edit_hwnd_);
+        rename_edit_hwnd_ = nullptr;
+        rename_item_index_ = -1;
+        rename_original_name_.clear();
+        rename_original_full_path_.clear();
+        return false;
+    }
+
+    SendMessageW(rename_edit_hwnd_, WM_SETFONT, SendMessageW(hwnd_, WM_GETFONT, 0, 0), TRUE);
+    SetFocus(rename_edit_hwnd_);
+
+    int selection_end = static_cast<int>(entry.name.size());
+    if (!entry.is_folder) {
+        const std::wstring::size_type dot = entry.name.find_last_of(L'.');
+        if (dot != std::wstring::npos && dot > 0) {
+            selection_end = static_cast<int>(dot);
+        }
+    }
+    SendMessageW(rename_edit_hwnd_, EM_SETSEL, 0, selection_end);
+    return true;
+}
+
+bool FileListView::CommitInlineRename() {
+    if (rename_edit_hwnd_ == nullptr || !IsWindow(rename_edit_hwnd_)) {
+        return false;
+    }
+
+    const int length = GetWindowTextLengthW(rename_edit_hwnd_);
+    std::wstring new_name((std::max)(0, length) + 1, L'\0');
+    if (length > 0) {
+        GetWindowTextW(rename_edit_hwnd_, new_name.data(), length + 1);
+        new_name.resize(static_cast<size_t>(length));
+    } else {
+        new_name.clear();
+    }
+
+    const std::wstring::size_type first = new_name.find_first_not_of(L" \t");
+    if (first == std::wstring::npos) {
+        MessageBoxW(rename_edit_hwnd_, L"Name cannot be empty.", L"Rename", MB_ICONWARNING | MB_OK);
+        SetFocus(rename_edit_hwnd_);
+        return false;
+    }
+    const std::wstring::size_type last = new_name.find_last_not_of(L" \t");
+    new_name = new_name.substr(first, last - first + 1);
+
+    if (new_name.find_first_of(L"\\/:*?\"<>|") != std::wstring::npos) {
+        MessageBoxW(
+            rename_edit_hwnd_,
+            L"Name contains invalid characters.",
+            L"Rename",
+            MB_ICONWARNING | MB_OK);
+        SetFocus(rename_edit_hwnd_);
+        return false;
+    }
+
+    if (new_name == rename_original_name_) {
+        EndInlineRenameControl();
+        return true;
+    }
+
+    if (!ApplyInlineRenameChange(rename_original_full_path_, new_name)) {
+        SetFocus(rename_edit_hwnd_);
+        return false;
+    }
+
+    EndInlineRenameControl();
+    return true;
+}
+
+void FileListView::CancelInlineRename() {
+    EndInlineRenameControl();
+}
+
+void FileListView::EndInlineRenameControl() {
+    const bool had_rename_control = rename_edit_hwnd_ != nullptr;
+    if (rename_edit_hwnd_ != nullptr) {
+        RemoveWindowSubclass(rename_edit_hwnd_, &FileListView::RenameEditSubclassProc, kRenameEditSubclassId);
+        if (IsWindow(rename_edit_hwnd_)) {
+            DestroyWindow(rename_edit_hwnd_);
+        }
+        rename_edit_hwnd_ = nullptr;
+    }
+
+    rename_item_index_ = -1;
+    rename_original_name_.clear();
+    rename_original_full_path_.clear();
+
+    if (had_rename_control && hwnd_ != nullptr) {
+        SetFocus(hwnd_);
+    }
+}
+
+bool FileListView::ApplyInlineRenameChange(const std::wstring& old_full_path, const std::wstring& new_name) {
+    const std::wstring parent_folder = ParentPath(old_full_path);
+    if (parent_folder.empty()) {
+        return false;
+    }
+
+    std::wstring new_full_path = parent_folder;
+    if (!new_full_path.empty() && new_full_path.back() != L'\\') {
+        new_full_path.push_back(L'\\');
+    }
+    new_full_path.append(new_name);
+
+    const std::wstring normalized_old = NormalizePath(old_full_path);
+    const std::wstring normalized_new = NormalizePath(new_full_path);
+
+    if (CompareStringOrdinal(
+            normalized_old.c_str(),
+            static_cast<int>(normalized_old.size()),
+            normalized_new.c_str(),
+            static_cast<int>(normalized_new.size()),
+            FALSE) == CSTR_EQUAL) {
+        return true;
+    }
+
+    DWORD rename_error = ERROR_SUCCESS;
+    if (!FileOps::RenamePath(normalized_old, normalized_new, &rename_error)) {
+        std::wstring message = L"Rename failed.\n\n";
+        if (rename_error == ERROR_SHARING_VIOLATION || rename_error == ERROR_LOCK_VIOLATION) {
+            message.append(L"The file is currently open in another program.\nClose it and try again.");
+        } else {
+            const std::wstring error_text = FormatWin32ErrorMessage(rename_error);
+            message.append(error_text);
+        }
+        MessageBoxW(rename_edit_hwnd_, message.c_str(), L"Rename", MB_ICONERROR | MB_OK);
+        return false;
+    }
+
+    if (IsPathCutPending(normalized_old)) {
+        RemoveCutPendingPaths({normalized_old});
+        SetCutPendingPaths({normalized_new});
+    }
+
+    bool updated = false;
+    for (FileEntry& entry : base_entries_) {
+        const std::wstring entry_path = NormalizePath(BuildFullPath(entry));
+        if (CompareStringOrdinal(
+                entry_path.c_str(),
+                static_cast<int>(entry_path.size()),
+                normalized_old.c_str(),
+                static_cast<int>(normalized_old.size()),
+                TRUE) != CSTR_EQUAL) {
+            continue;
+        }
+
+        entry.name = new_name;
+        entry.extension = entry.is_folder ? L"" : GetExtensionFromName(new_name);
+        entry.full_path = normalized_new;
+        updated = true;
+        break;
+    }
+
+    if (!updated && IsSelectableIndex(rename_item_index_)) {
+        FileEntry& entry = display_entries_[rename_item_index_];
+        entry.name = new_name;
+        entry.extension = entry.is_folder ? L"" : GetExtensionFromName(new_name);
+        entry.full_path = normalized_new;
+    }
+
+    SortBaseEntries();
+    BuildDisplayEntriesWithGroups();
+    UpdateSortIndicators();
+    UpdateItemCountAndRefresh(false);
+
+    int renamed_index = -1;
+    for (int i = 0; i < static_cast<int>(display_entries_.size()); ++i) {
+        if (!IsSelectableIndex(i)) {
+            continue;
+        }
+        const std::wstring entry_path = NormalizePath(BuildFullPath(display_entries_[i]));
+        if (CompareStringOrdinal(
+                entry_path.c_str(),
+                static_cast<int>(entry_path.size()),
+                normalized_new.c_str(),
+                static_cast<int>(normalized_new.size()),
+                TRUE) == CSTR_EQUAL) {
+            renamed_index = i;
+            break;
+        }
+    }
+
+    if (renamed_index >= 0) {
+        EnsureSingleSelectionAtIndex(renamed_index);
+    } else {
+        PostStatusUpdate();
+    }
+
+    if (!search_mode_) {
+        RequestRefresh();
+    }
+    return true;
+}
+
+bool FileListView::CreateNewFolderAndBeginRename() {
+    if (search_mode_ || current_path_.empty()) {
+        return false;
+    }
+
+    const std::wstring folder_path = BuildUniqueNewFolderPath();
+    if (folder_path.empty()) {
+        return false;
+    }
+
+    DWORD create_error = ERROR_SUCCESS;
+    if (!FileOps::CreateDirectoryPath(folder_path, &create_error)) {
+        const std::wstring error_text = FormatWin32ErrorMessage(create_error);
+        std::wstring message = L"Failed to create folder.\n\n";
+        message.append(error_text);
+        MessageBoxW(hwnd_, message.c_str(), L"New Folder", MB_ICONERROR | MB_OK);
+        return false;
+    }
+
+    WIN32_FILE_ATTRIBUTE_DATA attributes = {};
+    FILETIME modified_time = {};
+    if (GetFileAttributesExW(folder_path.c_str(), GetFileExInfoStandard, &attributes)) {
+        modified_time = attributes.ftLastWriteTime;
+    } else {
+        GetSystemTimeAsFileTime(&modified_time);
+    }
+
+    FileEntry entry = {};
+    entry.name = PathFindFileNameW(folder_path.c_str());
+    entry.full_path = folder_path;
+    entry.modified_time = modified_time;
+    entry.size_bytes = 0;
+    entry.attributes = FILE_ATTRIBUTE_DIRECTORY;
+    entry.is_folder = true;
+    entry.icon_index = ResolveIconIndex(folder_path, true);
+
+    base_entries_.push_back(std::move(entry));
+    SortBaseEntries();
+    BuildDisplayEntriesWithGroups();
+    UpdateSortIndicators();
+    UpdateItemCountAndRefresh(false);
+
+    int new_index = -1;
+    for (int i = 0; i < static_cast<int>(display_entries_.size()); ++i) {
+        if (!IsSelectableIndex(i)) {
+            continue;
+        }
+        const std::wstring entry_path = NormalizePath(BuildFullPath(display_entries_[i]));
+        if (CompareStringOrdinal(
+                entry_path.c_str(),
+                static_cast<int>(entry_path.size()),
+                folder_path.c_str(),
+                static_cast<int>(folder_path.size()),
+                TRUE) == CSTR_EQUAL) {
+            new_index = i;
+            break;
+        }
+    }
+
+    if (new_index >= 0) {
+        EnsureSingleSelectionAtIndex(new_index);
+        BeginInlineRename(new_index);
+    } else {
+        PostStatusUpdate();
+    }
+
+    if (!search_mode_) {
+        RequestRefresh();
+    }
+    return true;
+}
+
+std::wstring FileListView::BuildUniqueNewFolderPath() const {
+    if (current_path_.empty()) {
+        return L"";
+    }
+
+    constexpr wchar_t kBaseName[] = L"New folder";
+    for (int suffix = 1; suffix <= 9999; ++suffix) {
+        std::wstring candidate = current_path_;
+        if (candidate.back() != L'\\') {
+            candidate.push_back(L'\\');
+        }
+        candidate.append(kBaseName);
+        if (suffix > 1) {
+            wchar_t suffix_text[32] = {};
+            swprintf_s(suffix_text, L" (%d)", suffix);
+            candidate.append(suffix_text);
+        }
+
+        const DWORD attributes = GetFileAttributesW(candidate.c_str());
+        if (attributes == INVALID_FILE_ATTRIBUTES) {
+            return candidate;
+        }
+    }
+
+    return L"";
+}
+
+void FileListView::RequestRefresh() {
+    if (parent_hwnd_ != nullptr) {
+        if (!PostMessageW(parent_hwnd_, WM_FE_FILELIST_REFRESH, 0, 0)) {
+            LogLastError(L"PostMessageW(WM_FE_FILELIST_REFRESH)");
+        }
+    }
+}
+
+void FileListView::ClearCutPendingState() {
+    if (cut_pending_paths_.empty()) {
+        return;
+    }
+    cut_pending_paths_.clear();
+    if (hwnd_ != nullptr) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void FileListView::SetCutPendingPaths(const std::vector<std::wstring>& paths) {
+    cut_pending_paths_.clear();
+    cut_pending_paths_.reserve(paths.size());
+    for (const std::wstring& path : paths) {
+        if (!path.empty()) {
+            cut_pending_paths_.insert(ToLowerCopy(NormalizePath(path)));
+        }
+    }
+    if (hwnd_ != nullptr) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+void FileListView::RemoveCutPendingPaths(const std::vector<std::wstring>& paths) {
+    if (cut_pending_paths_.empty() || paths.empty()) {
+        return;
+    }
+    for (const std::wstring& path : paths) {
+        if (!path.empty()) {
+            cut_pending_paths_.erase(ToLowerCopy(NormalizePath(path)));
+        }
+    }
+    if (hwnd_ != nullptr) {
+        InvalidateRect(hwnd_, nullptr, FALSE);
+    }
+}
+
+bool FileListView::IsPathCutPending(const std::wstring& full_path) const {
+    if (full_path.empty() || cut_pending_paths_.empty()) {
+        return false;
+    }
+    const std::wstring key = ToLowerCopy(NormalizePath(full_path));
+    return cut_pending_paths_.find(key) != cut_pending_paths_.end();
+}
+
+bool FileListView::AppendShellContextMenu(HMENU menu, const std::wstring& path, UINT first_id, UINT last_id) {
+    if (menu == nullptr || path.empty()) {
+        return false;
+    }
+
+    PIDLIST_ABSOLUTE absolute_item_id = nullptr;
+    IShellFolder* parent_folder = nullptr;
+    IContextMenu* context_menu = nullptr;
+    PCUITEMID_CHILD child_item_id = nullptr;
+
+    const HRESULT parse_result = SHParseDisplayName(path.c_str(), nullptr, &absolute_item_id, 0, nullptr);
+    if (FAILED(parse_result) || absolute_item_id == nullptr) {
+        return false;
+    }
+
+    const HRESULT bind_result =
+        SHBindToParent(absolute_item_id, IID_IShellFolder, reinterpret_cast<void**>(&parent_folder), &child_item_id);
+    if (FAILED(bind_result) || parent_folder == nullptr || child_item_id == nullptr) {
+        CoTaskMemFree(absolute_item_id);
+        return false;
+    }
+
+    const HRESULT context_result = parent_folder->GetUIObjectOf(
+        hwnd_,
+        1,
+        &child_item_id,
+        IID_IContextMenu,
+        nullptr,
+        reinterpret_cast<void**>(&context_menu));
+    parent_folder->Release();
+    CoTaskMemFree(absolute_item_id);
+    if (FAILED(context_result) || context_menu == nullptr) {
+        return false;
+    }
+
+    const UINT insert_index = static_cast<UINT>(GetMenuItemCount(menu));
+    const HRESULT query_result =
+        context_menu->QueryContextMenu(menu, insert_index, first_id, last_id, CMF_NORMAL);
+    const UINT added_items = static_cast<UINT>(HRESULT_CODE(query_result));
+    if (FAILED(query_result) || added_items == 0U) {
+        context_menu->Release();
+        return false;
+    }
+
+    shell_context_menu_ = context_menu;
+    shell_context_menu_first_id_ = first_id;
+    shell_context_menu_last_id_ = last_id;
+    return true;
+}
+
+bool FileListView::InvokeShellContextMenu(UINT command_id) {
+    if (shell_context_menu_ == nullptr) {
+        return false;
+    }
+    if (command_id < shell_context_menu_first_id_ || command_id > shell_context_menu_last_id_) {
+        return false;
+    }
+
+    CMINVOKECOMMANDINFOEX invoke = {};
+    invoke.cbSize = sizeof(invoke);
+    invoke.fMask = CMIC_MASK_UNICODE;
+    invoke.hwnd = hwnd_;
+    invoke.lpVerb = MAKEINTRESOURCEA(command_id - shell_context_menu_first_id_);
+    invoke.lpVerbW = MAKEINTRESOURCEW(command_id - shell_context_menu_first_id_);
+    invoke.nShow = SW_SHOWNORMAL;
+
+    const HRESULT invoke_result = shell_context_menu_->InvokeCommand(
+        reinterpret_cast<LPCMINVOKECOMMANDINFO>(&invoke));
+    if (FAILED(invoke_result)) {
+        LogHResult(L"IContextMenu::InvokeCommand", invoke_result);
+        return false;
+    }
+    return true;
+}
+
+void FileListView::ClearShellContextMenu() {
+    if (shell_context_menu_ != nullptr) {
+        shell_context_menu_->Release();
+        shell_context_menu_ = nullptr;
+    }
+    shell_context_menu_first_id_ = 0;
+    shell_context_menu_last_id_ = 0;
 }
 
 void FileListView::DrawEmptyState(HDC hdc) const {
@@ -2010,6 +2787,30 @@ std::wstring FileListView::ParentPath(const std::wstring& path) {
         return L"";
     }
     return normalized.substr(0, separator);
+}
+
+std::wstring FileListView::FormatWin32ErrorMessage(DWORD error_code) {
+    wchar_t message_buffer[512] = {};
+    const DWORD written = FormatMessageW(
+        FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
+        nullptr,
+        error_code,
+        0,
+        message_buffer,
+        static_cast<DWORD>(std::size(message_buffer)),
+        nullptr);
+    if (written == 0U) {
+        wchar_t fallback[64] = {};
+        swprintf_s(fallback, L"Error code: %lu", error_code);
+        return fallback;
+    }
+
+    std::wstring message = message_buffer;
+    while (!message.empty() &&
+           (message.back() == L'\r' || message.back() == L'\n' || message.back() == L' ')) {
+        message.pop_back();
+    }
+    return message;
 }
 
 std::wstring FileListView::EntryKey(const FileEntry& entry) {

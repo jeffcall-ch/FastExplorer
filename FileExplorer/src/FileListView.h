@@ -10,7 +10,10 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <unordered_set>
 #include <vector>
+
+struct IContextMenu;
 
 namespace fileexplorer {
 
@@ -108,6 +111,13 @@ private:
         LPARAM l_param,
         UINT_PTR subclass_id,
         DWORD_PTR ref_data);
+    static LRESULT CALLBACK RenameEditSubclassProc(
+        HWND hwnd,
+        UINT message,
+        WPARAM w_param,
+        LPARAM l_param,
+        UINT_PTR subclass_id,
+        DWORD_PTR ref_data);
 
     bool CreateListViewControl();
     void CreateColumns();
@@ -155,10 +165,33 @@ private:
     bool OpenEntryAtIndex(int index, bool open_files_too);
     void ShowContextMenu(POINT screen_point, int hit_index);
     void DrawEmptyState(HDC hdc) const;
+    int ResolveContextTargetIndex(int hit_index) const;
+    std::vector<int> CollectSelectedSelectableIndices() const;
+    std::vector<std::wstring> CollectPathsForIndices(const std::vector<int>& indices) const;
+    void EnsureSingleSelectionAtIndex(int index);
+    bool CopySelectionToClipboard(bool cut, int fallback_index);
+    bool PasteFromClipboard();
+    bool DeleteSelection(bool permanent, int fallback_index);
+    bool BeginInlineRename(int index);
+    bool CommitInlineRename();
+    void CancelInlineRename();
+    void EndInlineRenameControl();
+    bool ApplyInlineRenameChange(const std::wstring& old_full_path, const std::wstring& new_name);
+    bool CreateNewFolderAndBeginRename();
+    std::wstring BuildUniqueNewFolderPath() const;
+    void RequestRefresh();
+    bool AppendShellContextMenu(HMENU menu, const std::wstring& path, UINT first_id, UINT last_id);
+    bool InvokeShellContextMenu(UINT command_id);
+    void ClearShellContextMenu();
+    void ClearCutPendingState();
+    void SetCutPendingPaths(const std::vector<std::wstring>& paths);
+    void RemoveCutPendingPaths(const std::vector<std::wstring>& paths);
+    bool IsPathCutPending(const std::wstring& full_path) const;
 
     std::wstring BuildFullPath(const FileEntry& entry) const;
     static std::wstring NormalizePath(std::wstring path);
     static std::wstring ParentPath(const std::wstring& path);
+    static std::wstring FormatWin32ErrorMessage(DWORD error_code);
     static std::wstring EntryKey(const FileEntry& entry);
     static bool EntriesEquivalent(const FileEntry& left, const FileEntry& right);
     static std::wstring GetExtensionFromName(const std::wstring& name);
@@ -198,6 +231,15 @@ private:
     std::wstring search_root_path_{};
     std::wstring search_pattern_{};
     ULONGLONG search_elapsed_ms_{0};
+
+    HWND rename_edit_hwnd_{nullptr};
+    int rename_item_index_{-1};
+    std::wstring rename_original_name_{};
+    std::wstring rename_original_full_path_{};
+    IContextMenu* shell_context_menu_{nullptr};
+    UINT shell_context_menu_first_id_{0};
+    UINT shell_context_menu_last_id_{0};
+    std::unordered_set<std::wstring> cut_pending_paths_{};
 };
 
 }  // namespace fileexplorer

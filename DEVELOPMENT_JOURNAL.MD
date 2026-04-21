@@ -22,11 +22,11 @@ Rule: Decisions must be explained, not just stated.
 ## Current Status
 
 ```text
-Last updated:      2026-04-19 by assistant
-Current phase:     Phase 9 - File Operations
-Current target:    CP-09 (not started)
-Last checkpoint:   CP-08 - PASS
-Build status:      PASS - Debug x64 solution build succeeds after Phase 8 closeout flyout-positioning fix
+Last updated:      2026-04-21 by assistant
+Current phase:     Phase 10 - Visual Polish
+Current target:    CP-10 (not started)
+Last checkpoint:   CP-09 - PASS
+Build status:      PASS - Debug x64 solution build succeeds after Phase 9 naming/cut-visual refinements
 Tests status:      PASS - FileExplorer.Tests.exe runs and passes (21 tests, 0 failures)
 Blockers:          None
 ```
@@ -46,7 +46,7 @@ Blockers:          None
 | 6 | Right Sidebar Shell | Complete | CP-06 | Completed on 2026-04-18 (user sign-off confirmed) |
 | 7 | Search Engine | Complete | CP-07 | Completed on 2026-04-18 (user-confirmed CP-07 interactive verification complete) |
 | 8 | Favourites System | Complete | CP-08 | Completed on 2026-04-19 (user-confirmed verification complete, persistence + async flyouts validated) |
-| 9 | File Operations | Not started | CP-09 | |
+| 9 | File Operations | Complete | CP-09 | Completed on 2026-04-21 (user-confirmed interactive verification complete) |
 | 10 | Visual Polish | Not started | CP-10 | |
 | 11 | Settings & Persistence | Not started | CP-11 | |
 | 12 | Single Instance | Not started | CP-12 | |
@@ -340,11 +340,140 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** Disable deep nesting (rejected), force left-side submenu expansion globally (rejected for inconsistent behavior), remove async submenu loading (rejected because CP-08 requires non-blocking flyout enumeration).  
 **Status:** Closed  
 
+### AD-045 - 2026-04-19 - Phase 9 File Operations Centered in FileOps + FileListView Wiring
+**Decision:** Implement Phase 9 operations with a focused split: Win32 operation wrappers in `FileOps` (clipboard `CF_HDROP`, paste/move, recycle/permanent delete, rename, properties, plain-text clipboard) and command wiring/inline-rename UX in `FileListView` (keyboard shortcuts, context menu actions, new-folder flow, shell-context invocation, refresh triggers).  
+**Rationale:** Keeps file-operation primitives reusable and testable while preserving existing navigation/search/tab/favourites architecture and minimizing cross-component risk in a behavior-heavy phase.  
+**Alternatives considered:** Putting all file-op logic directly inside `MainWindow` or `FileListView` only (rejected due cohesion/maintainability issues), large refactor across multiple subsystems (rejected to stay conservative and phase-scoped).  
+**Status:** Closed  
+
+### AD-046 - 2026-04-19 - CP-09 UX Refinements: Curated Menu, Open-File Rename Blocking, Collision Auto-Rename, Focus Return
+**Decision:** Keep the file-list right-click menu curated (remove appended full shell command set), enforce rename failure with explicit message when a file is open/locked, resolve copy-name collisions automatically as `<name> copy <x>` for files and folders, and restore keyboard focus to the details pane after rename/paste/delete/context actions.  
+**Rationale:** User feedback favored the curated productivity menu over full shell menu noise, required deterministic non-prompt copy collision handling, and required immediate arrow-key navigation without extra click after file operations.  
+**Alternatives considered:** Keep full shell context append (rejected by UX preference), rely on shell copy conflict prompts (rejected), leave focus unchanged after operations (rejected due extra-click friction).  
+**Status:** Closed  
+
+### AD-047 - 2026-04-19 - Copy Name Token Format + Cut-Pending Grey Rows
+**Decision:** Adjust copy-collision naming to the tokenized format `name copyN .ext` (with a space before the extension for files) and render `Ctrl+X` cut-pending items with muted grey text until cut state is cleared.  
+**Rationale:** User requested precise copy-name token edit ergonomics (`copyN ` selectable before extension) and stronger visual feedback that cut items are pending move/deletion.  
+**Alternatives considered:** Keep previous `name copy N.ext` format (rejected by UX requirement), no cut visual state (rejected), or dim via selection-only styling (rejected as insufficient persistence).  
+**Status:** Closed  
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 044 - 2026-04-21
+**Phase:** Phase 9 closeout -> Phase 10 kickoff  
+**Goal for this session:** Record final user sign-off for CP-09 and advance project status to the next phase.  
+**Completed:**  
+- User confirmed Phase 9 app verification is complete.  
+- Marked `CP-09` as PASS in project status.  
+- Updated active phase to `Phase 10 - Visual Polish` with target `CP-10 (not started)`.  
+- Updated Quick Reference table to mark Phase 9 as `Complete`.  
+**Not completed / carried forward:**  
+- Phase 10 implementation has not started yet.  
+**Decisions made:**  
+- None (status/sign-off transition only).  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-09 - Pass  
+**Next session should start with:**  
+- Re-read AGENTS/JOURNAL/PLAN and begin Phase 10 (`CP-10`) implementation.
+
+### Session 043 - 2026-04-19
+**Phase:** Phase 9 - File Operations (targeted UX adjustments)  
+**Goal for this session:** Apply user-requested copy-name token format and cut-pending row visualization.  
+**Completed:**  
+- Updated copy collision naming format for files to `name copyN .ext` (space before extension preserved).  
+- Kept folder collision naming as `Folder copyN` (no trailing-space suffix).  
+- Added cut-pending visual state in details list:
+  - `Ctrl+X` now marks selected items as pending-cut and renders them in grey text
+  - cut state clears on copy (`Ctrl+C`) and on successful move-paste
+  - cut markers update on delete and rename path changes.
+- Rebuilt full solution successfully (`Debug x64`, 0 warnings, 0 errors).
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).
+**Not completed / carried forward:**  
+- CP-09 final interactive sign-off still pending user confirmation after these UX adjustments.  
+**Decisions made:** AD-047  
+**Errors encountered and resolved:**  
+- One build pass failed with `LNK1168` because `FileExplorer.exe` was running; resolved by stopping process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-09 - Partial (implementation + refinements complete, final user verification pending)  
+**Next session should start with:**  
+- User verify exact filename collision pattern (`copyN ` token before extension) and cut-grey row behavior; if confirmed, mark CP-09 complete.
+
+### Session 042 - 2026-04-19
+**Phase:** Phase 9 - File Operations (refinement pass)  
+**Goal for this session:** Apply user-requested CP-09 behavior refinements after implementation validation.  
+**Completed:**  
+- Confirmed that full Windows shell context entries were appearing by design from CP-09 shell integration; switched UI behavior back to curated FileExplorer context menu (no appended full shell menu block).  
+- Added stricter rename handling for open/locked files:
+  - `FileOps::RenamePath` now probes for sharing/lock state on files before rename
+  - inline rename now shows explicit open-file guidance when sharing/lock violations occur.
+- Implemented copy collision auto-rename behavior for paste:
+  - on `Ctrl+C` + `Ctrl+V`, when destination name exists, target is auto-generated as `<name> copy <x>` with incremental `x`
+  - works for both files and folders
+  - no conflict prompt shown for this copy-collision path.
+- Improved details-pane focus recovery so keyboard navigation works immediately:
+  - details pane regains focus after paste/delete/context operations
+  - details pane regains focus after rename edit lifecycle ends.
+- Rebuilt full solution successfully (`Debug x64`, 0 warnings, 0 errors).
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).
+**Not completed / carried forward:**  
+- CP-09 final interactive verification/sign-off remains pending user confirmation after these refinements.  
+**Decisions made:** AD-046  
+**Errors encountered and resolved:**  
+- One build pass failed with `LNK1168` because `FileExplorer.exe` was running; resolved by stopping process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-09 - Partial (refinement pass complete, user verification pending)  
+**Next session should start with:**  
+- Re-run CP-09 verification in-app with focus on copy-collision naming, open-file rename error behavior, and no-extra-click keyboard focus after operations; if all pass, mark CP-09 complete.
+
+### Session 041 - 2026-04-19
+**Phase:** Phase 9 - File Operations  
+**Goal for this session:** Start CP-09 implementation after re-reading AGENTS/JOURNAL/PLAN/PRD and deliver the required file-operation behaviors without changing unrelated architecture.  
+**Completed:**  
+- Re-read required startup docs (`AGENTS.MD`, `DEVELOPMENT_JOURNAL.MD`, `PLAN.MD` Phase 9 / CP-09 criteria, `PRD.MD` Section 15 + keyboard shortcuts).  
+- Replaced `FileOps` stub with concrete Win32 wrappers:
+  - clipboard copy/cut via `CF_HDROP` (`Preferred DropEffect` for cut)
+  - paste from clipboard via `SHFileOperationW` (copy/move)
+  - delete to Recycle Bin + permanent delete
+  - rename wrapper (`MoveFileW`)
+  - new-folder create helper (`CreateDirectoryW`)
+  - properties open (`SHObjectProperties`)
+  - text clipboard copy (`CF_UNICODETEXT`).
+- Added Phase 9 keyboard/file operations in `FileListView`:
+  - `Ctrl+C`, `Ctrl+X`, `Ctrl+V`
+  - `Delete` (Recycle Bin), `Shift+Delete` (permanent with confirmation)
+  - `F2` inline rename (`EDIT` overlay with Enter/Escape handling)
+  - `Alt+Enter` properties.
+- Expanded file-list context menu behavior:
+  - wired Copy/Cut/Paste/Delete/Rename/New Folder/Properties/Copy Path commands
+  - retained favourite actions and search-result `Open file location`
+  - integrated shell context-menu command append/invoke path via `IContextMenu`.
+- Implemented `New Folder` creation with unique naming (`New folder`, `New folder (2)`, ...) and immediate inline rename mode.
+- Added explicit refresh triggers after file operations to keep list contents current.
+- Initialized COM apartment in `App::Run` for reliable shell context-menu interaction support.
+- Rebuilt full solution successfully (`Debug x64`, 0 warnings, 0 errors).
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).
+**Not completed / carried forward:**  
+- CP-09 interactive/manual verification is still pending user validation in-app.  
+**Decisions made:** AD-045  
+**Errors encountered and resolved:**  
+- `msbuild` was not on PATH in this shell; resolved by using the installed VS 18 MSBuild path.  
+- One compile pass failed due `std::max` mixed `LONG/int` ambiguity in rename-edit sizing; resolved with explicit integer casts.  
+- One link pass failed with `LNK1168` because `FileExplorer.exe` was running; resolved by stopping the process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-09 - Partial (implementation complete, interactive verification pending)  
+**Next session should start with:**  
+- Run the CP-09 in-app checklist (copy/cut/paste/delete/shift-delete/rename/new-folder/properties/copy-path/shell actions) and mark CP-09 pass when fully confirmed.
 
 ### Session 040 - 2026-04-19
 **Phase:** Phase 8 closeout -> Phase 9 kickoff  
@@ -1410,6 +1539,36 @@ Severity: Blocker | High | Low | Debt
 ---
 
 ## Test Results Log
+
+### Test Run 034 - 2026-04-19
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-copy-name-token + cut-visual-state refinement run)  
+**Failures:**  
+- None
+
+### Test Run 033 - 2026-04-19
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 9 refinement pass verification run)  
+**Failures:**  
+- None
+
+### Test Run 032 - 2026-04-19
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 9 implementation pass verification run)  
+**Failures:**  
+- None
 
 ### Test Run 031 - 2026-04-19
 **Configuration:** Debug x64  
