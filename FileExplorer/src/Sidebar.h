@@ -37,6 +37,7 @@ public:
     void SetDpi(UINT dpi);
     void SetCurrentPath(const std::wstring& path);
     void FocusSearch();
+    void SetSearchText(const std::wstring& text);
     void ClearSearchText(bool notify_parent);
     bool AddRegularFavourite(const std::wstring& path);
     bool AddFlyoutFavourite(const std::wstring& path);

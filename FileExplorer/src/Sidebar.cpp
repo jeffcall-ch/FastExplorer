@@ -22,6 +22,7 @@ constexpr COLORREF kSidebarBorderColor = RGB(0x2E, 0x37, 0x42);
 constexpr COLORREF kSidebarSectionSeparatorColor = RGB(0x32, 0x3A, 0x46);
 constexpr COLORREF kSearchBackgroundColor = RGB(0x21, 0x28, 0x31);
 constexpr COLORREF kSearchBorderColor = RGB(0x39, 0x44, 0x50);
+constexpr COLORREF kSearchBorderFocusedColor = RGB(0x52, 0x60, 0x71);
 constexpr COLORREF kSearchTextColor = RGB(0xA9, 0xB4, 0xC1);
 constexpr COLORREF kHeaderTextColor = RGB(0xD5, 0xDE, 0xE8);
 constexpr COLORREF kItemTextColor = RGB(0xE2, 0xE8, 0xF0);
@@ -203,6 +204,16 @@ void Sidebar::FocusSearch() {
     SendMessageW(search_edit_hwnd_, EM_SETSEL, 0, -1);
 }
 
+void Sidebar::SetSearchText(const std::wstring& text) {
+    if (search_edit_hwnd_ == nullptr) {
+        return;
+    }
+
+    SetWindowTextW(search_edit_hwnd_, text.c_str());
+    UpdateScrollInfo();
+    InvalidateRect(hwnd_, nullptr, FALSE);
+}
+
 void Sidebar::ClearSearchText(bool notify_parent) {
     if (search_edit_hwnd_ != nullptr) {
         SetWindowTextW(search_edit_hwnd_, L"");
@@ -280,6 +291,13 @@ LRESULT CALLBACK Sidebar::SearchEditSubclassProc(
         if (w_param == VK_ESCAPE) {
             self->ClearSearchText(true);
             return 0;
+        }
+        break;
+
+    case WM_SETFOCUS:
+    case WM_KILLFOCUS:
+        if (self->hwnd_ != nullptr) {
+            InvalidateRect(self->hwnd_, nullptr, FALSE);
         }
         break;
 
@@ -735,23 +753,31 @@ bool Sidebar::RegisterWindowClass() {
 }
 
 void Sidebar::EnsureFonts() {
-    LOGFONTW base_font = {};
-    const bool have_message_font = QueryMessageFont(&base_font);
-    if (!have_message_font) {
-        base_font.lfHeight = -MulDiv(9, static_cast<int>(dpi_), 72);
-        base_font.lfWeight = FW_NORMAL;
-        StringCchCopyW(base_font.lfFaceName, LF_FACESIZE, L"Segoe UI");
-    }
-
-    // Keep sidebar text density close to details-list typography.
-    base_font.lfHeight = MulDiv(base_font.lfHeight, static_cast<int>(dpi_), 96);
-    const int desired_item = base_font.lfHeight;
+    const int desired_item = -MulDiv(9, static_cast<int>(dpi_), 72);
     const int desired_header = desired_item;
 
+    auto create_ui_font = [](int pixel_height, LONG weight) -> HFONT {
+        LOGFONTW lf = {};
+        lf.lfHeight = pixel_height;
+        lf.lfWeight = weight;
+        lf.lfCharSet = DEFAULT_CHARSET;
+        lf.lfOutPrecision = OUT_DEFAULT_PRECIS;
+        lf.lfClipPrecision = CLIP_DEFAULT_PRECIS;
+        lf.lfQuality = CLEARTYPE_QUALITY;
+        lf.lfPitchAndFamily = DEFAULT_PITCH | FF_DONTCARE;
+
+        StringCchCopyW(lf.lfFaceName, LF_FACESIZE, L"Segoe UI Variable Text");
+        HFONT font = CreateFontIndirectW(&lf);
+        if (font != nullptr) {
+            return font;
+        }
+
+        StringCchCopyW(lf.lfFaceName, LF_FACESIZE, L"Segoe UI");
+        return CreateFontIndirectW(&lf);
+    };
+
     if (header_font_ == nullptr || header_font_height_ != desired_header) {
-        LOGFONTW header_lf = base_font;
-        header_lf.lfWeight = FW_SEMIBOLD;
-        header_font_.reset(CreateFontIndirectW(&header_lf));
+        header_font_.reset(create_ui_font(desired_header, FW_SEMIBOLD));
         if (header_font_ == nullptr) {
             LogLastError(L"CreateFontIndirectW(SidebarHeader)");
         }
@@ -759,9 +785,7 @@ void Sidebar::EnsureFonts() {
     }
 
     if (item_font_ == nullptr || item_font_height_ != desired_item) {
-        LOGFONTW item_lf = base_font;
-        item_lf.lfWeight = FW_NORMAL;
-        item_font_.reset(CreateFontIndirectW(&item_lf));
+        item_font_.reset(create_ui_font(desired_item, FW_NORMAL));
         if (item_font_ == nullptr) {
             LogLastError(L"CreateFontIndirectW(SidebarItem)");
         }
@@ -916,7 +940,9 @@ void Sidebar::Paint(HDC hdc) {
         search_left + ScaleForDpi(40, dpi_),
         static_cast<int>(client_rect.right) - ScaleForDpi(12, dpi_));
 
-    FillRoundedRect(hdc, layout.search_rect, kSearchBackgroundColor, kSearchBorderColor, ScaleForDpi(6, dpi_));
+    const bool search_focused = (search_edit_hwnd_ != nullptr && GetFocus() == search_edit_hwnd_);
+    const COLORREF search_border = search_focused ? kSearchBorderFocusedColor : kSearchBorderColor;
+    FillRoundedRect(hdc, layout.search_rect, kSearchBackgroundColor, search_border, ScaleForDpi(6, dpi_));
     UpdateSearchEditLayout(layout);
 
     clear_button_visible_ = false;

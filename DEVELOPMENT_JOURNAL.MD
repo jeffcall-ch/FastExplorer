@@ -24,9 +24,9 @@ Rule: Decisions must be explained, not just stated.
 ```text
 Last updated:      2026-04-21 by assistant
 Current phase:     Phase 10 - Visual Polish
-Current target:    CP-10 (not started)
+Current target:    CP-10 (in progress - incremental step 10 complete + tab-search textbox restore fix)
 Last checkpoint:   CP-09 - PASS
-Build status:      PASS - Debug x64 solution build succeeds after Phase 9 naming/cut-visual refinements
+Build status:      PASS - Debug x64 solution build succeeds after tab-search textbox restore fix
 Tests status:      PASS - FileExplorer.Tests.exe runs and passes (21 tests, 0 failures)
 Blockers:          None
 ```
@@ -47,7 +47,7 @@ Blockers:          None
 | 7 | Search Engine | Complete | CP-07 | Completed on 2026-04-18 (user-confirmed CP-07 interactive verification complete) |
 | 8 | Favourites System | Complete | CP-08 | Completed on 2026-04-19 (user-confirmed verification complete, persistence + async flyouts validated) |
 | 9 | File Operations | Complete | CP-09 | Completed on 2026-04-21 (user-confirmed interactive verification complete) |
-| 10 | Visual Polish | Not started | CP-10 | |
+| 10 | Visual Polish | In progress | CP-10 | Incremental steps 1+2+3+4+5+6+7+8+9+10 done; Ctrl+T/Ctrl+W tab shortcut routing fixed |
 | 11 | Settings & Persistence | Not started | CP-11 | |
 | 12 | Single Instance | Not started | CP-12 | |
 | 13 | Unit Tests | Not started | CP-13 | |
@@ -358,11 +358,317 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** Keep previous `name copy N.ext` format (rejected by UX requirement), no cut visual state (rejected), or dim via selection-only styling (rejected as insufficient persistence).  
 **Status:** Closed  
 
+### AD-048 - 2026-04-21 - Phase 10 Incremental Start via Shared Shell Color Tokens
+**Decision:** Start Phase 10 conservatively by centralizing existing top-level shell surface colors (base/nav/file-list/sidebar/status/text/separator) into `Colors.h` and wiring `MainWindow` to use those tokens without changing actual color values.  
+**Rationale:** User requested incremental visual work with no big appearance shifts; this improves palette consistency and maintainability while keeping the current approved look unchanged.  
+**Alternatives considered:** Immediate visible redesign/tint changes (rejected as too disruptive for requested incremental flow).  
+**Status:** Closed  
+
+### AD-049 - 2026-04-21 - Phase 10 Incremental Step 2: Empty-State Typography Refinement
+**Decision:** Refine empty-folder/search empty-state rendering in `FileListView` with clearer two-line hierarchy (title + subtitle), improved spacing, and Segoe UI Variable (fallback Segoe UI) font usage scaled by DPI.  
+**Rationale:** Provides a small, visible polish improvement aligned with CP-10 typography/empty-state goals while preserving layout structure and avoiding broad visual changes.  
+**Alternatives considered:** Larger panel-wide typography overhaul in one pass (rejected to keep incremental workflow and user-controlled confirmation cadence).  
+**Status:** Closed  
+
+### AD-050 - 2026-04-21 - Phase 10 Incremental Step 3: Animated Loading Spinner Polish
+**Decision:** Replace the text-based loading spinner (`|/-\`) in `FileListView` with an 8-step animated dot spinner inside the existing loading overlay, keeping load behavior and timing logic otherwise unchanged.  
+**Rationale:** Moves the loading surface closer to CP-10 visual polish goals with a compact modern indicator while staying strictly visual and low-risk.  
+**Alternatives considered:** Keep legacy text spinner (rejected for visual quality), full custom animation framework (rejected as unnecessary complexity).  
+**Status:** Closed  
+
+### AD-051 - 2026-04-21 - Phase 10 Incremental Step 4: Status Bar Typography Alignment
+**Decision:** Add a dedicated DPI-aware status bar font in `MainWindow` (`Segoe UI Variable Text` 11 pt regular with Segoe UI fallback) and re-apply it on `WM_DPICHANGED`.  
+**Rationale:** Aligns bottom status text with CP-10 typography requirements and the app's compact visual system without changing status behavior/content logic.  
+**Alternatives considered:** Keep default system font (rejected: inconsistent zone typography), broad app-wide font refactor in one pass (rejected for incremental-risk control).  
+**Status:** Closed  
+
+### AD-052 - 2026-04-21 - Global Ctrl+T New-Tab Shortcut Routing
+**Decision:** Handle `Ctrl+T` centrally in `MainWindow::MessageLoop` for key events targeting the main window or any child control, and route it through existing `HandleTabKeyboardShortcut` logic.  
+**Rationale:** `Ctrl+T` was implemented in main-window key handling but failed when child controls held focus; central routing preserves existing tab behavior while making shortcut handling reliable app-wide.  
+**Alternatives considered:** Add control-specific `Ctrl+T` handlers in each child (rejected as fragmented and error-prone), large accelerator-table refactor (rejected as unnecessary for this targeted fix).  
+**Status:** Closed  
+
+### AD-053 - 2026-04-21 - Global Ctrl+W Close-Tab Shortcut Routing
+**Decision:** Extend the same centralized message-loop shortcut interception used for `Ctrl+T` to also include `Ctrl+W`, reusing `HandleTabKeyboardShortcut` without changing tab-close logic itself.  
+**Rationale:** User reported `Ctrl+W` was not consistently closing the active tab when focus was in child controls; routing at the main loop level makes behavior reliable across focus contexts.  
+**Alternatives considered:** Add per-control `Ctrl+W` forwarding (rejected as duplicative), accelerator-table refactor (rejected as out-of-scope for targeted bugfix).  
+**Status:** Closed  
+
+### AD-054 - 2026-04-21 - Phase 10 Incremental Step 5: Nav Button Keyboard Focus Visual
+**Decision:** Add a subtle custom focus ring for owner-drawn navigation toolbar buttons (`Back`, `Forward`, `Up`, `Refresh`) when they receive keyboard focus (`ODS_FOCUS`).  
+**Rationale:** Improves keyboard accessibility and visual state clarity while staying within strict visual-only scope and existing control behavior.  
+**Alternatives considered:** Keep no explicit focus state (rejected: weaker keyboard affordance), use default `DrawFocusRect` (rejected: legacy dotted look inconsistent with current dark style).  
+**Status:** Closed  
+
+### AD-055 - 2026-04-21 - Phase 10 Incremental Step 6: Sidebar Typography Normalization
+**Decision:** Normalize sidebar header/item fonts to explicit DPI-aware `Segoe UI Variable Text` (ClearType) with `Segoe UI` fallback, replacing reliance on ambient system message-font defaults.  
+**Rationale:** Tightens cross-zone typography consistency for CP-10 while preserving existing sidebar layout, spacing model, and behavior.  
+**Alternatives considered:** Keep system-derived font face (rejected: inconsistent typography source), broad global typography refactor in one pass (rejected for incremental risk control).  
+**Status:** Closed  
+
+### AD-056 - 2026-04-21 - Phase 10 Incremental Step 7: Main List Typography Normalization
+**Decision:** Add explicit DPI-aware `Segoe UI Variable Text` fonts for details-list body rows and header (semibold), with `Segoe UI` fallback, and apply them to the list and header controls.  
+**Rationale:** Brings the primary pane into the same typography system as sidebar/nav/status while preserving list behavior, sorting, and rendering architecture.  
+**Alternatives considered:** Keep system-default list/header fonts (rejected: inconsistent typography source), large typography redesign in one pass (rejected for incremental safety).  
+**Status:** Closed  
+
+### AD-057 - 2026-04-21 - Phase 10 Incremental Step 8: Explicit DWM Frame Extension Fallback
+**Decision:** When `DWMWA_SYSTEMBACKDROP_TYPE` fails, call `DwmExtendFrameIntoClientArea` with zero margins before using solid fallback painting.  
+**Rationale:** Aligns implementation with planned Mica fallback path and keeps fallback behavior explicit/robust in VM or unsupported environments.  
+**Alternatives considered:** Keep implicit solid-paint fallback only (rejected as less aligned to plan guidance).  
+**Status:** Closed  
+
+### AD-058 - 2026-04-21 - Phase 10 Incremental Step 9: Sidebar Search Focus State
+**Decision:** Add an explicit focused border state for the sidebar search surface and trigger repaint on search edit focus transitions (`WM_SETFOCUS`/`WM_KILLFOCUS`).  
+**Rationale:** Improves interactive focus-state clarity and dark-theme coherence without altering search behavior, layout, or control structure.  
+**Alternatives considered:** Keep single static search border (rejected: weaker focus affordance), rely on default edit focus visuals only (rejected: inconsistent with custom painted search container).  
+**Status:** Closed  
+
+### AD-059 - 2026-04-21 - Phase 10 Incremental Step 10: File-Type Color Tokens in Colors.h
+**Decision:** Move file-type accent colors (PDF/Excel/Word/Archive/Text) into centralized `Colors.h` tokens and switch `FileListView::ColorForExtension` to consume those constants.  
+**Rationale:** Aligns palette governance with CP-10 intent (single color source of truth) while preserving existing PRD-mandated file-type color behavior.  
+**Alternatives considered:** Keep per-file hardcoded RGB constants in `FileListView` (rejected: fragmented color ownership).  
+**Status:** Closed  
+
+### AD-060 - 2026-04-21 - Restore Sidebar Search Phrase on Search Snapshot Tab Return
+**Decision:** Add `Sidebar::SetSearchText(...)` and invoke it when `MainWindow` restores a tab's `FileListView::SearchSnapshot`, so switching back to a search tab restores both results and visible query text.  
+**Rationale:** User observed that search results persisted across tab switches but the sidebar search box cleared, hiding the active search phrase context.  
+**Alternatives considered:** Keep status-bar text as the only search-context hint (rejected: insufficient discoverability), rerun search on tab return to repopulate text (rejected: unnecessary work and potential latency).  
+**Status:** Closed  
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 055 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (tab search UX refinement)  
+**Goal for this session:** Fix tab switch UX gap where search results restore but search phrase text is missing in sidebar.  
+**Completed:**  
+- Added public `Sidebar::SetSearchText(const std::wstring&)` API to set the search edit text without triggering a new search request.  
+- Updated `MainWindow::HandleTabStateChanged` to set sidebar search text from restored search snapshot pattern when returning to a search tab.  
+- Added safety fallback: if snapshot restore fails unexpectedly, tab flow falls back to normal folder load path.  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- CP-10 final consolidated verification/sign-off still pending.  
+**Decisions made:** AD-060  
+**Errors encountered and resolved:**  
+- `LNK1168` due to running `FileExplorer.exe`; resolved by terminating the process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental progress continues; search-tab text restore fixed)  
+**Next session should start with:**  
+- User verify: run search in tab A, switch to tab B, return to tab A, confirm both results and search phrase remain visible.
+
+### Session 054 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental step 10)  
+**Goal for this session:** Continue CP-10 by centralizing remaining palette tokens to reduce visual drift risk.  
+**Completed:**  
+- Added file-type accent color constants to `Colors.h` (PDF/Excel/Word/Archive/Text).  
+- Updated `FileListView::ColorForExtension` to use centralized color tokens instead of local hardcoded RGB values.  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- CP-10 final user-facing verification/sign-off still pending.  
+**Decisions made:** AD-059  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 10 complete)  
+**Next session should start with:**  
+- Consolidate and run final CP-10 visual verification checklist in-app, then mark checkpoint complete if confirmed.
+
+### Session 053 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental step 9)  
+**Goal for this session:** Continue CP-10 by improving focus-state visibility for sidebar search interactions.  
+**Completed:**  
+- Added focused-border rendering for the sidebar search field container (subtle dark accent when search edit has focus).  
+- Added repaint hooks for search edit focus changes to ensure immediate visual updates.  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 items still pending and will continue incrementally.  
+**Decisions made:** AD-058  
+**Errors encountered and resolved:**  
+- `LNK1168` due to running `FileExplorer.exe`; resolved by terminating the process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 9 complete)  
+**Next session should start with:**  
+- Continue CP-10 by closing any remaining visual-state consistency gaps and preparing final CP-10 verification checklist.
+
+### Session 052 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental steps 7 and 8)  
+**Goal for this session:** Continue CP-10 with meaningful progress on typography consistency and backdrop fallback robustness.  
+**Completed:**  
+- Implemented details-pane typography normalization:
+  - added explicit DPI-aware `Segoe UI Variable Text` fonts for list body + header
+  - applied fonts to list and header controls with `Segoe UI` fallback.
+- Implemented explicit DWM fallback path:
+  - on system-backdrop failure, now invokes `DwmExtendFrameIntoClientArea` with zero margins before solid fallback painting.
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 items still pending; implementation continues without large redesign.  
+**Decisions made:** AD-056, AD-057  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 8 complete)  
+**Next session should start with:**  
+- Continue CP-10 by tightening any remaining interactive focus/visual-state gaps and then prepare for consolidated in-app verification.
+
+### Session 051 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental step 6)  
+**Goal for this session:** Continue CP-10 with a meaningful typography consistency improvement in the right sidebar.  
+**Completed:**  
+- Updated `Sidebar::EnsureFonts` to use explicit DPI-aware `Segoe UI Variable Text` fonts (header semibold + item regular) with ClearType and `Segoe UI` fallback.  
+- Kept existing sidebar density/layout logic and interaction behavior unchanged.  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 items still pending; implementation continues incrementally.  
+**Decisions made:** AD-055  
+**Errors encountered and resolved:**  
+- `LNK1168` due to running `FileExplorer.exe`; resolved by terminating process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 6 complete)  
+**Next session should start with:**  
+- Continue CP-10 by tightening remaining typography/state consistency in primary list zones.
+
+### Session 050 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental step 5)  
+**Goal for this session:** Continue CP-10 with one small visual-only improvement to interactive control states.  
+**Completed:**  
+- Added keyboard-focus rendering for owner-drawn nav buttons in `NavBar::DrawNavButton`:
+  - detects `ODS_FOCUS`
+  - paints a subtle inset rounded focus ring in dark-theme palette
+  - keeps existing hover/pressed/disabled behavior unchanged.
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 items still pending and will continue incrementally after user confirmation.  
+**Decisions made:** AD-054  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 5 complete)  
+**Next session should start with:**  
+- User verify nav buttons show a subtle focus ring during keyboard focus traversal; then proceed with the next small visual-only refinement.
+
+### Session 049 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (targeted shortcut reliability bugfix)  
+**Goal for this session:** Fix user-reported unreliable `Ctrl+W` current-tab close behavior.  
+**Completed:**  
+- Verified root cause: centralized shortcut interception currently handled `Ctrl+T` only.  
+- Extended `MainWindow::MessageLoop` key interception to include `Ctrl+W` for main/child-targeted key events, routed via existing `HandleTabKeyboardShortcut`.  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 polish items continue incrementally after user confirmation.  
+**Decisions made:** AD-053  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (shortcut reliability fixes applied for Ctrl+T/Ctrl+W)  
+**Next session should start with:**  
+- User verify `Ctrl+W` closes active tab reliably from file list, sidebar search, and breadcrumb edit focus contexts.
+
+### Session 048 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (targeted shortcut bugfix)  
+**Goal for this session:** Fix user-reported `Ctrl+T` failure so new tab opens reliably regardless of focused child control.  
+**Completed:**  
+- Traced keyboard routing path and identified root cause: child controls consume focus so `MainWindow` did not always receive `WM_KEYDOWN` for `Ctrl+T`.  
+- Implemented centralized `Ctrl+T` interception in `MainWindow::MessageLoop` for messages targeting the main window or its children, reusing `HandleTabKeyboardShortcut` for behavior consistency.  
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 visual polish items remain pending and continue incrementally.  
+**Decisions made:** AD-052  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental visual progress continues; shortcut bug fixed)  
+**Next session should start with:**  
+- User verify `Ctrl+T` opens a new tab from details list, sidebar search box, and breadcrumb edit mode; then continue next incremental polish step.
+
+### Session 047 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental step 4)  
+**Goal for this session:** Continue CP-10 with one small visual-only typography improvement.  
+**Completed:**  
+- Re-read required startup docs and confirmed active plan target (`CP-10`) before edits.  
+- Implemented status-bar typography polish in `MainWindow`:
+  - added RAII-managed status font (`Segoe UI Variable Text`, 11 pt regular, ClearType, Segoe UI fallback)
+  - applied font at status control creation
+  - recreated/reapplied font on `WM_DPICHANGED`.
+- Rebuilt solution successfully (`Debug x64`, `x64\\Debug\\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 visual criteria are still pending and will continue incrementally after user confirmation.  
+**Decisions made:** AD-051  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 4 complete)  
+**Next session should start with:**  
+- User confirms status-bar typography looks aligned with detail/right-pane text density; then proceed to the next small visual-only refinement.
+
+### Session 046 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental step 3)  
+**Goal for this session:** Continue CP-10 with one additional conservative visual-only improvement and keep behavior unchanged.  
+**Completed:**  
+- Re-read required session docs and confirmed active target remains `CP-10` incremental flow.  
+- Implemented loading overlay visual polish in `FileListView`:
+  - replaced `|/-\` text spinner with an 8-step animated dot spinner
+  - kept the existing overlay and status text behavior intact
+  - tightened animation cadence to `80 ms` timer ticks for smoother motion.
+- Rebuilt solution successfully (`Debug x64`, `x64\Debug\FileExplorer.exe` produced).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 polish criteria still pending and will continue incrementally after user confirmation.  
+**Decisions made:** AD-050  
+**Errors encountered and resolved:**  
+- Initial build command failed because `msbuild` was not on PATH in this shell; resolved by invoking the full Visual Studio MSBuild path directly.  
+- One multi-proc diagnostic build returned failure without actionable errors; resolved by re-running single-node build (`/m:1`) which completed successfully.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 3 complete)  
+**Next session should start with:**  
+- User confirms loading overlay spinner look; then proceed to the next small Phase 10 visual-only refinement.
+
+### Session 045 - 2026-04-21
+**Phase:** Phase 10 - Visual Polish (incremental step 1)  
+**Goal for this session:** Begin CP-10 with a minimal, low-risk polish change and no major visual redesign.  
+**Completed:**  
+- Re-read required startup docs (`AGENTS.MD`, `DEVELOPMENT_JOURNAL.MD`, `PLAN.MD` Phase 10 criteria).  
+- Expanded `Colors.h` to include shared shell palette tokens for base/nav/file-list/sidebar/status/text/separator surfaces.  
+- Updated `MainWindow` to consume the new `Colors.h` tokens for:
+  - fallback background
+  - zone brushes
+  - status bar fill/text/separator
+  - static control background/text wiring.
+- Kept all effective colors visually identical to previous values (infrastructure alignment, not redesign).  
+- Rebuilt full solution successfully (`Debug x64`, 0 warnings, 0 errors).  
+- Ran tests successfully: `FileExplorer.Tests.exe` (`21` tests, `0` failures).  
+**Not completed / carried forward:**  
+- Remaining CP-10 visual polish items still pending and will be handled incrementally after user confirmation.  
+**Decisions made:** AD-048  
+**Errors encountered and resolved:**  
+- One build pass failed with `LNK1168` because `FileExplorer.exe` was running; resolved by stopping process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-10 - Partial (incremental step 1 complete)  
+**Next session should start with:**  
+- User confirm this no-big-change step; then proceed to incremental step 2 (small, user-reviewed visual refinement).
 
 ### Session 044 - 2026-04-21
 **Phase:** Phase 9 closeout -> Phase 10 kickoff  
@@ -1539,6 +1845,116 @@ Severity: Blocker | High | Low | Debt
 ---
 
 ## Test Results Log
+
+### Test Run 045 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-tab-search textbox restore fix verification run)  
+**Failures:**  
+- None
+
+### Test Run 044 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental step 10 file-type palette centralization verification run)  
+**Failures:**  
+- None
+
+### Test Run 043 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental step 9 sidebar search focus-state verification run)  
+**Failures:**  
+- None
+
+### Test Run 042 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental steps 7/8 typography + fallback polishing verification run)  
+**Failures:**  
+- None
+
+### Test Run 041 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental step 6 sidebar typography normalization verification run)  
+**Failures:**  
+- None
+
+### Test Run 040 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental step 5 nav-button focus-state polish verification run)  
+**Failures:**  
+- None
+
+### Test Run 039 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Ctrl+W global shortcut routing fix verification run)  
+**Failures:**  
+- None
+
+### Test Run 038 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Ctrl+T global shortcut routing fix verification run)  
+**Failures:**  
+- None
+
+### Test Run 037 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental step 4 status-bar typography verification run)  
+**Failures:**  
+- None
+
+### Test Run 036 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental step 3 loading-spinner polish verification run)  
+**Failures:**  
+- None
+
+### Test Run 035 - 2026-04-21
+**Configuration:** Debug x64  
+**Test count:** 21  
+**Passed:** 21  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Phase 10 incremental step 1 verification run)  
+**Failures:**  
+- None
 
 ### Test Run 034 - 2026-04-19
 **Configuration:** Debug x64  

@@ -125,6 +125,7 @@ private:
     void ApplyColumnMode();
     void ApplyHeaderVisualStyle();
     void EnsureSystemImageList();
+    void EnsureUiFonts();
     void EnsureDividerFont();
 
     bool HandleGetDispInfo(NMLVDISPINFOW* info) const;
@@ -219,6 +220,10 @@ private:
 
     UniqueFont divider_font_{nullptr};
     int divider_font_height_{0};
+    UniqueFont list_font_{nullptr};
+    int list_font_height_{0};
+    UniqueFont header_font_{nullptr};
+    int header_font_height_{0};
 
     std::wstring type_ahead_buffer_{};
     DWORD type_ahead_last_tick_{0};

@@ -39,8 +39,12 @@ private:
     struct BrushDeleter {
         void operator()(HBRUSH brush) const noexcept;
     };
+    struct FontDeleter {
+        void operator()(HFONT font) const noexcept;
+    };
 
     using UniqueBrush = std::unique_ptr<std::remove_pointer_t<HBRUSH>, BrushDeleter>;
+    using UniqueFont = std::unique_ptr<std::remove_pointer_t<HFONT>, FontDeleter>;
 
     static LRESULT CALLBACK WindowProc(HWND hwnd, UINT message, WPARAM w_param, LPARAM l_param);
     LRESULT HandleMessage(UINT message, WPARAM w_param, LPARAM l_param);
@@ -52,6 +56,7 @@ private:
     void DestroyZoneBrushes();
     void ApplyWindowChrome();
     void RecalculateLayout();
+    void EnsureStatusBarFont();
     void LayoutChildZones();
     void OnDpiChanged(UINT new_dpi, RECT* suggested_rect);
     void PaintFallbackBackground(HDC hdc);
@@ -116,6 +121,8 @@ private:
     UniqueBrush file_list_brush_{nullptr};
     UniqueBrush sidebar_brush_{nullptr};
     UniqueBrush status_brush_{nullptr};
+    UniqueFont status_font_{nullptr};
+    int status_font_pixel_height_{0};
 };
 
 }  // namespace fileexplorer

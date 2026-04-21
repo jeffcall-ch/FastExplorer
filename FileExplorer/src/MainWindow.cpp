@@ -9,6 +9,7 @@
 #include <string>
 #include <utility>
 
+#include "Colors.h"
 #include "WorkerMessages.h"
 #include "SearchWorker.h"
 
@@ -26,14 +27,6 @@ constexpr int kControlIdFileList = 1003;
 constexpr int kControlIdSidebar = 1004;
 constexpr int kControlIdStatusBar = 1005;
 
-constexpr COLORREF kFallbackBackgroundColor = RGB(0x16, 0x1A, 0x20);
-constexpr COLORREF kZoneTextColor = RGB(0xE2, 0xE7, 0xEE);
-
-constexpr COLORREF kNavBarColor = RGB(0x1A, 0x1F, 0x26);
-constexpr COLORREF kFileListColor = RGB(0x18, 0x1C, 0x22);
-constexpr COLORREF kSidebarColor = RGB(0x1C, 0x22, 0x2A);
-constexpr COLORREF kStatusBarColor = RGB(0x16, 0x1A, 0x20);
-constexpr COLORREF kStatusBarSeparatorColor = RGB(0x2C, 0x33, 0x3D);
 constexpr UINT_PTR kFolderRefreshDebounceTimerId = 9201;
 constexpr UINT kFolderRefreshDebounceMs = 500;
 
@@ -154,6 +147,12 @@ void MainWindow::BrushDeleter::operator()(HBRUSH brush) const noexcept {
     }
 }
 
+void MainWindow::FontDeleter::operator()(HFONT font) const noexcept {
+    if (font != nullptr) {
+        DeleteObject(font);
+    }
+}
+
 MainWindow::MainWindow()
     : metrics_(DefaultLayoutMetrics()),
       folder_generation_source_(std::make_shared<std::atomic<uint64_t>>(0)),
@@ -189,6 +188,20 @@ int MainWindow::MessageLoop() {
 
         if (result == 0) {
             return static_cast<int>(message.wParam);
+        }
+
+        // Ensure Ctrl+T/Ctrl+W tab shortcuts work even when focus is inside child controls.
+        if (message.message == WM_KEYDOWN) {
+            const bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            if (ctrl_down &&
+                (message.wParam == 'T' || message.wParam == 't' ||
+                 message.wParam == 'W' || message.wParam == 'w') &&
+                hwnd_ != nullptr &&
+                (message.hwnd == hwnd_ || IsChild(hwnd_, message.hwnd))) {
+                if (HandleTabKeyboardShortcut(message.wParam, true, false)) {
+                    continue;
+                }
+            }
         }
 
         TranslateMessage(&message);
@@ -312,27 +325,28 @@ bool MainWindow::InitializeChildZones() {
         LogLastError(L"CreateWindowExW(StatusBarZone)");
         return false;
     }
+    EnsureStatusBarFont();
 
     return true;
 }
 
 void MainWindow::CreateZoneBrushes() {
-    nav_brush_.reset(CreateSolidBrush(kNavBarColor));
+    nav_brush_.reset(CreateSolidBrush(fileexplorer::colors::kBgNavBar));
     if (!nav_brush_) {
         LogLastError(L"CreateSolidBrush(NavBar)");
     }
 
-    file_list_brush_.reset(CreateSolidBrush(kFileListColor));
+    file_list_brush_.reset(CreateSolidBrush(fileexplorer::colors::kBgFileList));
     if (!file_list_brush_) {
         LogLastError(L"CreateSolidBrush(FileList)");
     }
 
-    sidebar_brush_.reset(CreateSolidBrush(kSidebarColor));
+    sidebar_brush_.reset(CreateSolidBrush(fileexplorer::colors::kBgSidebar));
     if (!sidebar_brush_) {
         LogLastError(L"CreateSolidBrush(Sidebar)");
     }
 
-    status_brush_.reset(CreateSolidBrush(kStatusBarColor));
+    status_brush_.reset(CreateSolidBrush(fileexplorer::colors::kBgStatus));
     if (!status_brush_) {
         LogLastError(L"CreateSolidBrush(StatusBar)");
     }
@@ -359,6 +373,11 @@ void MainWindow::ApplyWindowChrome() {
     if (FAILED(backdrop_result)) {
         use_solid_fallback_background_ = true;
         LogHResult(L"DwmSetWindowAttribute(DWMWA_SYSTEMBACKDROP_TYPE)", backdrop_result);
+        MARGINS margins = {0, 0, 0, 0};
+        const HRESULT extend_result = DwmExtendFrameIntoClientArea(hwnd_, &margins);
+        if (FAILED(extend_result)) {
+            LogHResult(L"DwmExtendFrameIntoClientArea(Fallback)", extend_result);
+        }
     } else {
         use_solid_fallback_background_ = false;
     }
@@ -370,6 +389,57 @@ void MainWindow::ApplyWindowChrome() {
 
 void MainWindow::RecalculateLayout() {
     metrics_ = ScaleLayoutMetrics(dpi_);
+}
+
+void MainWindow::EnsureStatusBarFont() {
+    const int requested_pixel_height = -MulDiv(11, static_cast<int>(dpi_), 72);
+    if (status_font_ != nullptr && status_font_pixel_height_ == requested_pixel_height) {
+        return;
+    }
+
+    status_font_.reset(CreateFontW(
+        requested_pixel_height,
+        0,
+        0,
+        0,
+        FW_NORMAL,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI Variable Text"));
+    if (status_font_ == nullptr) {
+        status_font_.reset(CreateFontW(
+            requested_pixel_height,
+            0,
+            0,
+            0,
+            FW_NORMAL,
+            FALSE,
+            FALSE,
+            FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE,
+            L"Segoe UI"));
+    }
+
+    if (status_font_ == nullptr) {
+        LogLastError(L"CreateFontW(StatusBar)");
+        status_font_pixel_height_ = 0;
+        return;
+    }
+
+    status_font_pixel_height_ = requested_pixel_height;
+    if (status_bar_hwnd_ != nullptr) {
+        SendMessageW(status_bar_hwnd_, WM_SETFONT, reinterpret_cast<WPARAM>(status_font_.get()), TRUE);
+    }
 }
 
 void MainWindow::LayoutChildZones() {
@@ -426,6 +496,7 @@ void MainWindow::LayoutChildZones() {
 void MainWindow::OnDpiChanged(UINT new_dpi, RECT* suggested_rect) {
     dpi_ = (new_dpi == 0U) ? 96U : new_dpi;
     RecalculateLayout();
+    EnsureStatusBarFont();
     tab_strip_.SetDpi(dpi_);
     nav_bar_.SetDpi(dpi_);
     file_list_view_.SetDpi(dpi_);
@@ -454,7 +525,7 @@ void MainWindow::PaintFallbackBackground(HDC hdc) {
         return;
     }
 
-    HBRUSH fallback_brush = CreateSolidBrush(kFallbackBackgroundColor);
+    HBRUSH fallback_brush = CreateSolidBrush(fileexplorer::colors::kBgBase);
     if (fallback_brush == nullptr) {
         LogLastError(L"CreateSolidBrush(FallbackBackground)");
         return;
@@ -508,7 +579,7 @@ void MainWindow::PaintFileListInsetGutter(HDC hdc) {
     HBRUSH brush = file_list_brush_.get();
     HBRUSH transient_brush = nullptr;
     if (brush == nullptr) {
-        transient_brush = CreateSolidBrush(kFileListColor);
+        transient_brush = CreateSolidBrush(fileexplorer::colors::kBgFileList);
         brush = transient_brush;
     }
 
@@ -550,9 +621,16 @@ void MainWindow::HandleTabStateChanged() {
         const auto snapshot_it = search_snapshots_.find(active->id);
         if (tab_switched && snapshot_it != search_snapshots_.end()) {
             CancelSearchWorker();
-            file_list_view_.RestoreSearchSnapshot(snapshot_it->second);
-            pending_post_load_selection_name_.clear();
-            StopFolderWatcher();
+            if (file_list_view_.RestoreSearchSnapshot(snapshot_it->second)) {
+                sidebar_.SetSearchText(snapshot_it->second.pattern);
+                pending_post_load_selection_name_.clear();
+                StopFolderWatcher();
+            } else {
+                const std::wstring post_load_selection_name = std::move(pending_post_load_selection_name_);
+                pending_post_load_selection_name_.clear();
+                StartFolderLoad(active->path, false, post_load_selection_name);
+                RestartFolderWatcher(active->path);
+            }
         } else {
             const std::wstring post_load_selection_name = std::move(pending_post_load_selection_name_);
             pending_post_load_selection_name_.clear();
@@ -1164,14 +1242,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         if (status_brush_ != nullptr) {
             FillRect(draw_item->hDC, &rect, status_brush_.get());
         } else {
-            HBRUSH fallback = CreateSolidBrush(kStatusBarColor);
+            HBRUSH fallback = CreateSolidBrush(fileexplorer::colors::kBgStatus);
             if (fallback != nullptr) {
                 FillRect(draw_item->hDC, &rect, fallback);
                 DeleteObject(fallback);
             }
         }
 
-        HPEN separator_pen = CreatePen(PS_SOLID, 1, kStatusBarSeparatorColor);
+        HPEN separator_pen = CreatePen(PS_SOLID, 1, fileexplorer::colors::kSeparatorSubtle);
         if (separator_pen != nullptr) {
             HGDIOBJ old_pen = SelectObject(draw_item->hDC, separator_pen);
             MoveToEx(draw_item->hDC, rect.left, rect.top, nullptr);
@@ -1196,7 +1274,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         text_rect.right -= MulDiv(8, static_cast<int>(dpi_), 96);
 
         SetBkMode(draw_item->hDC, TRANSPARENT);
-        SetTextColor(draw_item->hDC, kZoneTextColor);
+        SetTextColor(draw_item->hDC, fileexplorer::colors::kTextPrimary);
         DrawTextW(
             draw_item->hDC,
             text,
@@ -1323,22 +1401,22 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         const HDC hdc = reinterpret_cast<HDC>(w_param);
         const HWND control_hwnd = reinterpret_cast<HWND>(l_param);
 
-        COLORREF background_color = kFileListColor;
+        COLORREF background_color = fileexplorer::colors::kBgFileList;
         HBRUSH background_brush = file_list_brush_.get();
 
         if (control_hwnd == nav_bar_hwnd_) {
-            background_color = kNavBarColor;
+            background_color = fileexplorer::colors::kBgNavBar;
             background_brush = nav_brush_.get();
         } else if (control_hwnd == sidebar_hwnd_) {
-            background_color = kSidebarColor;
+            background_color = fileexplorer::colors::kBgSidebar;
             background_brush = sidebar_brush_.get();
         } else if (control_hwnd == status_bar_hwnd_) {
-            background_color = kStatusBarColor;
+            background_color = fileexplorer::colors::kBgStatus;
             background_brush = status_brush_.get();
         }
 
         if (hdc != nullptr) {
-            SetTextColor(hdc, kZoneTextColor);
+            SetTextColor(hdc, fileexplorer::colors::kTextPrimary);
             SetBkColor(hdc, background_color);
             SetBkMode(hdc, OPAQUE);
         }

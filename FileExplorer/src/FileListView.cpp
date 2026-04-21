@@ -1,5 +1,6 @@
 #include "FileListView.h"
 #include "FileOps.h"
+#include "Colors.h"
 
 #include <Objbase.h>
 #include <Shellapi.h>
@@ -32,10 +33,13 @@ constexpr COLORREF kHeaderDividerColor = RGB(0x33, 0x3B, 0x47);
 constexpr COLORREF kHeaderSortGlyphColor = RGB(0xA9, 0xB4, 0xC2);
 constexpr COLORREF kDividerBackgroundColor = RGB(0x1E, 0x24, 0x2B);
 constexpr COLORREF kDividerTextColor = RGB(0xAC, 0xB6, 0xC2);
+constexpr COLORREF kEmptyStateTitleColor = RGB(0xD9, 0xE1, 0xEB);
 constexpr COLORREF kEmptyStateTextColor = RGB(0x9F, 0xA8, 0xB5);
 constexpr COLORREF kLoadingOverlayBackgroundColor = RGB(0x24, 0x2A, 0x33);
 constexpr COLORREF kLoadingOverlayBorderColor = RGB(0x3A, 0x43, 0x4F);
 constexpr COLORREF kLoadingOverlayTextColor = RGB(0xDF, 0xE5, 0xEE);
+constexpr COLORREF kLoadingSpinnerBaseColor = RGB(0x5B, 0x67, 0x76);
+constexpr COLORREF kLoadingSpinnerActiveColor = RGB(0xE2, 0xEC, 0xF8);
 
 constexpr UINT kMenuCopy = 7001;
 constexpr UINT kMenuCut = 7002;
@@ -52,7 +56,7 @@ constexpr UINT_PTR kRenameEditSubclassId = 2;
 constexpr UINT kShellMenuCommandFirst = 7400;
 constexpr UINT kShellMenuCommandLast = 7599;
 constexpr DWORD kTypeAheadResetMs = 1200;
-constexpr UINT kLoadingTimerMs = 120;
+constexpr UINT kLoadingTimerMs = 80;
 
 void LogLastError(const wchar_t* context) {
     const DWORD error_code = GetLastError();
@@ -92,6 +96,22 @@ FILETIME Uint64ToFileTime(ULONGLONG value) {
     return file_time;
 }
 
+BYTE LerpChannel(BYTE from, BYTE to, int numerator, int denominator) {
+    if (denominator <= 0) {
+        return from;
+    }
+    const int value = static_cast<int>(from) +
+        ((static_cast<int>(to) - static_cast<int>(from)) * numerator) / denominator;
+    return static_cast<BYTE>((std::max)(0, (std::min)(255, value)));
+}
+
+COLORREF LerpColor(COLORREF from, COLORREF to, int numerator, int denominator) {
+    return RGB(
+        LerpChannel(GetRValue(from), GetRValue(to), numerator, denominator),
+        LerpChannel(GetGValue(from), GetGValue(to), numerator, denominator),
+        LerpChannel(GetBValue(from), GetBValue(to), numerator, denominator));
+}
+
 bool SameDate(const SYSTEMTIME& left, const SYSTEMTIME& right) {
     return left.wYear == right.wYear && left.wMonth == right.wMonth && left.wDay == right.wDay;
 }
@@ -110,6 +130,82 @@ bool StartsWithInsensitive(const std::wstring& text, const std::wstring& prefix)
                prefix.c_str(),
                static_cast<int>(prefix.size()),
                TRUE) == CSTR_EQUAL;
+}
+
+HFONT CreateEmptyStateFont(int point_size, UINT dpi, LONG weight) {
+    const int pixel_height = -MulDiv(point_size, static_cast<int>(dpi), 72);
+    HFONT font = CreateFontW(
+        pixel_height,
+        0,
+        0,
+        0,
+        weight,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI Variable");
+    if (font != nullptr) {
+        return font;
+    }
+
+    return CreateFontW(
+        pixel_height,
+        0,
+        0,
+        0,
+        weight,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI");
+}
+
+HFONT CreateUiFont(int point_size, UINT dpi, LONG weight) {
+    const int pixel_height = -MulDiv(point_size, static_cast<int>(dpi), 72);
+    HFONT font = CreateFontW(
+        pixel_height,
+        0,
+        0,
+        0,
+        weight,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI Variable Text");
+    if (font != nullptr) {
+        return font;
+    }
+
+    return CreateFontW(
+        pixel_height,
+        0,
+        0,
+        0,
+        weight,
+        FALSE,
+        FALSE,
+        FALSE,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_DONTCARE,
+        L"Segoe UI");
 }
 
 }  // namespace
@@ -142,6 +238,7 @@ bool FileListView::Create(HWND parent, HINSTANCE instance, int control_id) {
     }
 
     CreateColumns();
+    EnsureUiFonts();
     ApplyColumnMode();
     ApplyHeaderVisualStyle();
     EnsureSystemImageList();
@@ -159,6 +256,11 @@ void FileListView::SetDpi(UINT dpi) {
     dpi_ = (dpi == 0U) ? 96U : dpi;
     divider_font_.reset();
     divider_font_height_ = 0;
+    list_font_.reset();
+    list_font_height_ = 0;
+    header_font_.reset();
+    header_font_height_ = 0;
+    EnsureUiFonts();
     EnsureDividerFont();
     ApplyColumnMode();
     ApplyHeaderVisualStyle();
@@ -693,6 +795,40 @@ void FileListView::EnsureDividerFont() {
     divider_font_height_ = requested_height;
 }
 
+void FileListView::EnsureUiFonts() {
+    const int desired_list_height = -MulDiv(9, static_cast<int>(dpi_), 72);
+    const int desired_header_height = desired_list_height;
+
+    if (list_font_ == nullptr || list_font_height_ != desired_list_height) {
+        list_font_.reset(CreateUiFont(9, dpi_, FW_NORMAL));
+        if (list_font_ == nullptr) {
+            LogLastError(L"CreateFontW(FileListBody)");
+            list_font_height_ = 0;
+        } else {
+            list_font_height_ = desired_list_height;
+        }
+    }
+
+    if (header_font_ == nullptr || header_font_height_ != desired_header_height) {
+        header_font_.reset(CreateUiFont(9, dpi_, FW_SEMIBOLD));
+        if (header_font_ == nullptr) {
+            LogLastError(L"CreateFontW(FileListHeader)");
+            header_font_height_ = 0;
+        } else {
+            header_font_height_ = desired_header_height;
+        }
+    }
+
+    if (hwnd_ != nullptr && list_font_ != nullptr) {
+        SendMessageW(hwnd_, WM_SETFONT, reinterpret_cast<WPARAM>(list_font_.get()), TRUE);
+    }
+
+    const HWND header = (hwnd_ != nullptr) ? ListView_GetHeader(hwnd_) : nullptr;
+    if (header != nullptr && header_font_ != nullptr) {
+        SendMessageW(header, WM_SETFONT, reinterpret_cast<WPARAM>(header_font_.get()), TRUE);
+    }
+}
+
 bool FileListView::HandleGetDispInfo(NMLVDISPINFOW* info) const {
     if (info == nullptr || info->item.iItem < 0 || info->item.iItem >= static_cast<int>(display_entries_.size())) {
         return false;
@@ -1199,7 +1335,7 @@ LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM
 
     case WM_TIMER:
         if (w_param == kLoadingTimerId && loading_) {
-            loading_frame_ = (loading_frame_ + 1) % 12;
+            loading_frame_ = (loading_frame_ + 1) % 8;
             InvalidateRect(hwnd_, nullptr, FALSE);
             return 0;
         }
@@ -1451,8 +1587,8 @@ void FileListView::DrawLoadingOverlay(HDC hdc) const {
         return;
     }
 
-    const int overlay_width = MulDiv(190, static_cast<int>(dpi_), 96);
-    const int overlay_height = MulDiv(42, static_cast<int>(dpi_), 96);
+    const int overlay_width = MulDiv(210, static_cast<int>(dpi_), 96);
+    const int overlay_height = MulDiv(44, static_cast<int>(dpi_), 96);
     RECT overlay_rect = {};
     overlay_rect.left = ((client_rect.right - client_rect.left) - overlay_width) / 2;
     overlay_rect.top = ((client_rect.bottom - client_rect.top) - overlay_height) / 2;
@@ -1475,16 +1611,55 @@ void FileListView::DrawLoadingOverlay(HDC hdc) const {
         DeleteObject(border_pen);
     }
 
-    static constexpr wchar_t kSpinnerFrames[] = L"|/-\\";
-    const wchar_t spinner = kSpinnerFrames[loading_frame_ % 4];
+    struct SpinnerOffset {
+        int x;
+        int y;
+    };
+    static constexpr SpinnerOffset kSpinnerOffsets[8] = {
+        {0, -9},
+        {6, -6},
+        {9, 0},
+        {6, 6},
+        {0, 9},
+        {-6, 6},
+        {-9, 0},
+        {-6, -6},
+    };
 
-    wchar_t text_buffer[64] = {};
-    swprintf_s(text_buffer, L"Loading...  %c", spinner);
+    const int spinner_center_x = overlay_rect.left + MulDiv(24, static_cast<int>(dpi_), 96);
+    const int spinner_center_y = overlay_rect.top + ((overlay_rect.bottom - overlay_rect.top) / 2);
+    const int dot_radius = (std::max)(2, MulDiv(2, static_cast<int>(dpi_), 96));
+    const int leader_index = loading_frame_ % 8;
+
+    for (int i = 0; i < 8; ++i) {
+        const int offset_x = MulDiv(kSpinnerOffsets[i].x, static_cast<int>(dpi_), 96);
+        const int offset_y = MulDiv(kSpinnerOffsets[i].y, static_cast<int>(dpi_), 96);
+        const int distance = (i - leader_index + 8) % 8;
+        const int intensity = 8 - distance;
+        const COLORREF dot_color = LerpColor(kLoadingSpinnerBaseColor, kLoadingSpinnerActiveColor, intensity, 8);
+
+        HBRUSH dot_brush = CreateSolidBrush(dot_color);
+        if (dot_brush != nullptr) {
+            HGDIOBJ old_pen = SelectObject(hdc, GetStockObject(NULL_PEN));
+            HGDIOBJ old_brush = SelectObject(hdc, dot_brush);
+            Ellipse(
+                hdc,
+                spinner_center_x + offset_x - dot_radius,
+                spinner_center_y + offset_y - dot_radius,
+                spinner_center_x + offset_x + dot_radius + 1,
+                spinner_center_y + offset_y + dot_radius + 1);
+            SelectObject(hdc, old_brush);
+            SelectObject(hdc, old_pen);
+            DeleteObject(dot_brush);
+        }
+    }
 
     RECT text_rect = overlay_rect;
+    text_rect.left = spinner_center_x + MulDiv(16, static_cast<int>(dpi_), 96);
+    text_rect.right -= MulDiv(10, static_cast<int>(dpi_), 96);
     SetBkMode(hdc, TRANSPARENT);
     SetTextColor(hdc, kLoadingOverlayTextColor);
-    DrawTextW(hdc, text_buffer, -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    DrawTextW(hdc, L"Loading...", -1, &text_rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 }
 
 void FileListView::CaptureViewState(
@@ -2703,14 +2878,25 @@ void FileListView::DrawEmptyState(HDC hdc) const {
         return;
     }
 
-    std::wstring text = L"This folder is empty";
-    if (search_mode_) {
-        text = L"No files found matching \"";
-        text.append(search_pattern_);
-        text.push_back(L'"');
+    const bool search_empty = search_mode_;
+    std::wstring title_text = L"This folder is empty";
+    std::wstring subtitle_text = L"Drag files here or navigate to a folder";
+    if (search_empty) {
+        title_text = L"No files found matching \"";
+        title_text.append(search_pattern_);
+        title_text.push_back(L'"');
+        subtitle_text = L"Try a broader wildcard pattern";
     }
-    RECT text_rect = client_rect;
-    text_rect.top += MulDiv(36, static_cast<int>(dpi_), 96);
+
+    const int client_width = static_cast<int>(client_rect.right - client_rect.left);
+    const int client_height = static_cast<int>(client_rect.bottom - client_rect.top);
+    const int center_x = client_rect.left + (client_width / 2);
+    const int center_y = client_rect.top + (client_height / 2);
+
+    const int icon_size = MulDiv(32, static_cast<int>(dpi_), 96);
+    const int icon_y = center_y - MulDiv(54, static_cast<int>(dpi_), 96);
+    const int title_top = icon_y + icon_size + MulDiv(14, static_cast<int>(dpi_), 96);
+    const int subtitle_top = title_top + MulDiv(26, static_cast<int>(dpi_), 96);
 
     SHFILEINFOW shell_info = {};
     if (SHGetFileInfoW(
@@ -2720,15 +2906,57 @@ void FileListView::DrawEmptyState(HDC hdc) const {
             sizeof(shell_info),
             SHGFI_ICON | SHGFI_LARGEICON | SHGFI_USEFILEATTRIBUTES) != 0 &&
         shell_info.hIcon != nullptr) {
-        const int icon_x = ((client_rect.right - client_rect.left) - 32) / 2;
-        const int icon_y = ((client_rect.bottom - client_rect.top) / 2) - 28;
-        DrawIconEx(hdc, icon_x, icon_y, shell_info.hIcon, 32, 32, 0, nullptr, DI_NORMAL);
+        const int icon_x = center_x - (icon_size / 2);
+        DrawIconEx(hdc, icon_x, icon_y, shell_info.hIcon, icon_size, icon_size, 0, nullptr, DI_NORMAL);
         DestroyIcon(shell_info.hIcon);
     }
 
+    HFONT title_font = CreateEmptyStateFont(search_empty ? 16 : 18, dpi_, FW_NORMAL);
+    HFONT subtitle_font = CreateEmptyStateFont(12, dpi_, FW_NORMAL);
+    HFONT old_font = nullptr;
+
     SetBkMode(hdc, TRANSPARENT);
+    if (title_font != nullptr) {
+        old_font = static_cast<HFONT>(SelectObject(hdc, title_font));
+    }
+    SetTextColor(hdc, kEmptyStateTitleColor);
+
+    RECT title_rect = {};
+    title_rect.left = client_rect.left + MulDiv(24, static_cast<int>(dpi_), 96);
+    title_rect.right = client_rect.right - MulDiv(24, static_cast<int>(dpi_), 96);
+    title_rect.top = title_top;
+    title_rect.bottom = title_top + MulDiv(28, static_cast<int>(dpi_), 96);
+    DrawTextW(hdc, title_text.c_str(), -1, &title_rect, DT_CENTER | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    HFONT subtitle_restore_font = old_font;
+    if (subtitle_font != nullptr) {
+        subtitle_restore_font = static_cast<HFONT>(SelectObject(hdc, subtitle_font));
+    }
     SetTextColor(hdc, kEmptyStateTextColor);
-    DrawTextW(hdc, text.c_str(), -1, &text_rect, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    RECT subtitle_rect = {};
+    subtitle_rect.left = client_rect.left + MulDiv(24, static_cast<int>(dpi_), 96);
+    subtitle_rect.right = client_rect.right - MulDiv(24, static_cast<int>(dpi_), 96);
+    subtitle_rect.top = subtitle_top;
+    subtitle_rect.bottom = subtitle_top + MulDiv(20, static_cast<int>(dpi_), 96);
+    DrawTextW(
+        hdc,
+        subtitle_text.c_str(),
+        -1,
+        &subtitle_rect,
+        DT_CENTER | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+
+    if (subtitle_font != nullptr) {
+        SelectObject(hdc, subtitle_restore_font);
+        DeleteObject(subtitle_font);
+    }
+
+    if (title_font != nullptr) {
+        if (old_font != nullptr) {
+            SelectObject(hdc, old_font);
+        }
+        DeleteObject(title_font);
+    }
 }
 
 std::wstring FileListView::BuildFullPath(const FileEntry& entry) const {
@@ -2918,19 +3146,19 @@ COLORREF FileListView::ColorForExtension(const std::wstring& extension, bool is_
 
     const std::wstring lower = ToLowerCopy(extension);
     if (lower == L".pdf") {
-        return RGB(0xE0, 0x6C, 0x75);
+        return fileexplorer::colors::kFilePdf;
     }
     if (lower == L".xls" || lower == L".xlsx" || lower == L".xlsm") {
-        return RGB(0x98, 0xC3, 0x79);
+        return fileexplorer::colors::kFileExcel;
     }
     if (lower == L".doc" || lower == L".docx") {
-        return RGB(0x61, 0xAF, 0xEF);
+        return fileexplorer::colors::kFileWord;
     }
     if (lower == L".zip" || lower == L".7z" || lower == L".rar" || lower == L".tar" || lower == L".gz") {
-        return RGB(0xE5, 0xC0, 0x7B);
+        return fileexplorer::colors::kFileArchive;
     }
     if (lower == L".txt" || lower == L".md" || lower == L".log") {
-        return RGB(0x56, 0xB6, 0xC2);
+        return fileexplorer::colors::kFileText;
     }
     return CLR_INVALID;
 }

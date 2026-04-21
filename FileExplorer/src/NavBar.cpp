@@ -17,6 +17,7 @@ constexpr COLORREF kToolbarButtonPressed = RGB(0x34, 0x3D, 0x49);
 constexpr COLORREF kToolbarButtonDisabled = RGB(0x1D, 0x22, 0x2A);
 constexpr COLORREF kToolbarButtonBorder = RGB(0x35, 0x3E, 0x49);
 constexpr COLORREF kToolbarButtonBorderHot = RGB(0x48, 0x53, 0x61);
+constexpr COLORREF kToolbarButtonFocus = RGB(0x64, 0x73, 0x85);
 constexpr COLORREF kToolbarGlyph = RGB(0xE2, 0xE8, 0xF1);
 constexpr COLORREF kToolbarGlyphDisabled = RGB(0x7B, 0x83, 0x90);
 
@@ -369,6 +370,7 @@ bool NavBar::DrawNavButton(const DRAWITEMSTRUCT* draw_item) const {
     const bool disabled = (draw_item->itemState & ODS_DISABLED) != 0;
     const bool pressed = (draw_item->itemState & ODS_SELECTED) != 0;
     const bool hot_from_state = (draw_item->itemState & ODS_HOTLIGHT) != 0;
+    const bool focused = (draw_item->itemState & ODS_FOCUS) != 0;
 
     bool hovered = hot_from_state;
     POINT cursor = {};
@@ -393,6 +395,28 @@ bool NavBar::DrawNavButton(const DRAWITEMSTRUCT* draw_item) const {
 
     const int radius = MulDiv(6, static_cast<int>(dpi_), 96);
     FillRoundedRect(draw_item->hDC, rect, fill, border, radius);
+
+    if (focused && !disabled) {
+        RECT focus_rect = rect;
+        InflateRect(&focus_rect, -1, -1);
+        const int focus_radius = (std::max)(2, radius - 2);
+        HPEN focus_pen = CreatePen(PS_SOLID, 1, kToolbarButtonFocus);
+        if (focus_pen != nullptr) {
+            HGDIOBJ old_pen = SelectObject(draw_item->hDC, focus_pen);
+            HGDIOBJ old_brush = SelectObject(draw_item->hDC, GetStockObject(NULL_BRUSH));
+            RoundRect(
+                draw_item->hDC,
+                focus_rect.left,
+                focus_rect.top,
+                focus_rect.right,
+                focus_rect.bottom,
+                focus_radius,
+                focus_radius);
+            SelectObject(draw_item->hDC, old_brush);
+            SelectObject(draw_item->hDC, old_pen);
+            DeleteObject(focus_pen);
+        }
+    }
 
     const wchar_t* glyph = GlyphForButtonId(draw_item->CtlID);
     if (glyph != nullptr && glyph[0] != L'\0') {
