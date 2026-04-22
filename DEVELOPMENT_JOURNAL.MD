@@ -24,9 +24,9 @@ Rule: Decisions must be explained, not just stated.
 ```text
 Last updated:      2026-04-22 by assistant
 Current phase:     Phase 15 - Portable Release Build
-Current target:    CP-15 (not started - waiting for user instruction)
-Last checkpoint:   CP-14 - PASS
-Build status:      PASS - Debug x64 app rebuilt after header-tail dark-theme fix
+Current target:    CP-15 - PASS
+Last checkpoint:   CP-15 - PASS
+Build status:      PASS - Release x64 build verified; portable package produced
 Tests status:      PASS - FileExplorer.Tests.exe runs and passes (56 tests, 0 failures)
 Blockers:          None
 ```
@@ -52,7 +52,7 @@ Blockers:          None
 | 12 | Single Instance | Complete | CP-12 | Completed on 2026-04-22 (user validation confirmed) |
 | 13 | Unit Tests | Complete | CP-13 | Completed on 2026-04-22 (required test names/cases aligned; 56 passing tests) |
 | 14 | Integration & Manual Tests | Complete | CP-14 | Completed on 2026-04-22 (full manual matrix user-confirmed) |
-| 15 | Portable Release | Not started | CP-15 | |
+| 15 | Portable Release | Complete | CP-15 | Completed on 2026-04-22 (release build + portable validation complete) |
 
 Status key: Not started | In progress | Complete | Blocked | Partial
 
@@ -532,11 +532,53 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** Force column-width/layout changes to hide the tail (rejected: behavior/layout side effects), full header `WM_PAINT` ownership (rejected: previously unstable/high-risk path), additional theme flags only (rejected: not sufficient for this artifact).  
 **Status:** Closed
 
+### AD-077 - 2026-04-22 - Phase 15 Release Metadata + Portable Packaging Closure
+**Decision:** Finalize CP-15 by adding `VERSIONINFO` resource metadata, enforcing explicit Release optimization/no-debug-link settings, producing a clean `FileExplorer_v1.0_portable` folder (`FileExplorer.exe` + `README.txt` only), and validating first-run creation of portable data files via smoke run.  
+**Rationale:** CP-15 requires a portable self-contained Release binary with embedded version metadata, dependency verification, and portable-folder behavior validation.  
+**Alternatives considered:** Keep version metadata absent (rejected: fails CP-15), ship release output folder with build artifacts (`.pdb`, `.obj`) (rejected: not clean portable package), defer portable first-run verification (rejected).  
+**Status:** Closed
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 072 - 2026-04-22
+**Phase:** Phase 15 - Portable Release Build (checkpoint closure)  
+**Goal for this session:** Complete and validate CP-15 release packaging requirements end-to-end.  
+**Completed:**  
+- Added `VERSIONINFO` block to [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc) with:
+  - `ProductName = FileExplorer`
+  - `FileVersion = 1.0.0.0`
+  - `CompanyName = FastExplorer`
+  - aligned product/file metadata fields.  
+- Updated Release build settings in [FileExplorer.vcxproj](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/FileExplorer.vcxproj):
+  - `ClCompile Optimization = MaxSpeed` (`/O2`)
+  - `Link GenerateDebugInformation = false` (no release debug symbols in binary output path).  
+- Built `Release|x64` successfully (0 errors, 0 warnings).  
+- Verified release binary metadata (`Get-Item ... VersionInfo`) reflects `1.0.0.0` and `ProductName = FileExplorer`.  
+- Verified dependencies with `dumpbin /dependents`:
+  - only system DLLs observed (`COMCTL32`, `dwmapi`, `UxTheme`, `SHELL32`, `SHLWAPI`, `KERNEL32`, `USER32`, `GDI32`, `ole32`).  
+- Verified release binary size: `~0.51 MB` (< 5 MB target).  
+- Created clean portable folder [FileExplorer_v1.0_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0_portable) with:
+  - `FileExplorer.exe`
+  - `README.txt`  
+- Ran portable smoke from packaged folder:
+  - launched packaged EXE and closed cleanly
+  - confirmed first-run creation of `settings.ini`, `session.ini`, `sort_settings.csv`, `flyout_favourites.csv`, `regular_favourites.csv`
+  - restored package to clean shipped state (`.exe` + `README.txt` only).  
+- Re-ran unit tests (`x64\\Debug\\FileExplorer.Tests.exe`): 56 passed, 0 failed.  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-077  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- Project release follow-up only (optional post-1.0 refinements or maintenance tasks).
 
 ### Session 071 - 2026-04-22
 **Phase:** Phase 15 - Portable Release Build (header-tail visual completion)  
@@ -2340,6 +2382,16 @@ Severity: Blocker | High | Low | Debt
 ---
 
 ## Test Results Log
+
+### Test Run 061 - 2026-04-22
+**Configuration:** Debug x64  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-CP-15 release packaging closeout regression run)  
+**Failures:**  
+- None
 
 ### Test Run 060 - 2026-04-22
 **Configuration:** Debug x64  
