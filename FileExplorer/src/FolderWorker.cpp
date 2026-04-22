@@ -84,7 +84,7 @@ void FolderWorker::Run(Request request) {
         return;
     }
 
-    auto entries = std::make_unique<std::vector<FileEntry>>(EnumerateEntries(request.path));
+    auto entries = std::make_unique<std::vector<FileEntry>>(EnumerateEntries(request.path, request.show_hidden_files));
     std::sort(
         entries->begin(),
         entries->end(),
@@ -111,7 +111,7 @@ void FolderWorker::Run(Request request) {
     entries.release();
 }
 
-std::vector<FileEntry> FolderWorker::EnumerateEntries(const std::wstring& path) {
+std::vector<FileEntry> FolderWorker::EnumerateEntries(const std::wstring& path, bool show_hidden_files) {
     std::vector<FileEntry> entries;
     if (path.empty()) {
         return entries;
@@ -135,7 +135,9 @@ std::vector<FileEntry> FolderWorker::EnumerateEntries(const std::wstring& path) 
             continue;
         }
 
-        if ((find_data.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0) {
+        const bool is_hidden = (find_data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+        const bool is_system = (find_data.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0;
+        if ((!show_hidden_files && is_hidden) || is_system) {
             continue;
         }
 

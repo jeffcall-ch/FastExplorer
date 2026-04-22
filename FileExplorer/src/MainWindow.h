@@ -18,8 +18,10 @@
 #include "FileListView.h"
 #include "FolderWorker.h"
 #include "NavBar.h"
+#include "SessionStore.h"
 #include "Settings.h"
 #include "Sidebar.h"
+#include "SortSettings.h"
 #include "TabManager.h"
 #include "TabStrip.h"
 #include "Theme.h"
@@ -36,6 +38,7 @@ public:
 
     bool Create(HINSTANCE instance, int show_command);
     int MessageLoop();
+    HWND hwnd() const noexcept { return hwnd_; }
 
 private:
     struct BrushDeleter {
@@ -62,7 +65,13 @@ private:
     void RecalculateLayout();
     void EnsureStatusBarFont();
     void LayoutChildZones();
+    void InitializeMainMenu();
+    void UpdateViewMenuChecks();
+    void ToggleShowHiddenFiles();
+    void ToggleShowExtensions();
     void LoadLayoutSettings();
+    void LoadSessionState();
+    void SaveSessionState() const;
     void SaveLayoutSettings() const;
     bool ApplySidebarWidthFromPointerX(int pointer_x);
     int EffectiveSidebarWidthPx(int client_width) const;
@@ -82,6 +91,9 @@ private:
     void StoreSearchSnapshotForTab(uint64_t tab_id);
     void RemoveSearchSnapshotForTab(uint64_t tab_id);
     void PruneSearchSnapshots();
+    void StoreViewSnapshotForTab(uint64_t tab_id);
+    void ApplyPendingViewSnapshotForTab(uint64_t tab_id);
+    void PruneViewSnapshots();
     void PreparePostLoadSelectionForTransition(const std::wstring& from_path, const std::wstring& to_path);
     void StartDebouncedRefreshForActiveFolder(uint64_t watch_generation);
     void RestartFolderWatcher(const std::wstring& path);
@@ -96,6 +108,8 @@ private:
     HWND sidebar_hwnd_{nullptr};
     HWND sidebar_splitter_hwnd_{nullptr};
     HWND status_bar_hwnd_{nullptr};
+    HMENU main_menu_{nullptr};
+    HMENU view_menu_{nullptr};
 
     UINT dpi_{96U};
     LayoutMetrics metrics_{};
@@ -120,6 +134,7 @@ private:
     ULONGLONG search_started_tick_ms_{0};
     uint64_t last_active_tab_id_{0};
     std::unordered_map<uint64_t, FileListView::SearchSnapshot> search_snapshots_{};
+    std::unordered_map<uint64_t, FileListView::ViewStateSnapshot> view_snapshots_{};
     bool pending_incremental_refresh_{false};
 
     std::thread folder_watch_thread_{};
@@ -138,6 +153,9 @@ private:
     int status_font_pixel_height_{0};
 
     Settings settings_{};
+    Settings::Values settings_values_{};
+    SessionStore session_store_{};
+    SortSettings sort_settings_{};
 };
 
 }  // namespace fileexplorer

@@ -15,7 +15,15 @@ namespace {
 
 constexpr wchar_t kSettingsFileName[] = L"settings.ini";
 constexpr wchar_t kGeneralSection[] = L"General";
+constexpr wchar_t kWindowSection[] = L"Window";
+constexpr wchar_t kShowHiddenFilesKey[] = L"ShowHiddenFiles";
+constexpr wchar_t kShowExtensionsKey[] = L"ShowExtensions";
+constexpr wchar_t kThemeKey[] = L"Theme";
 constexpr wchar_t kSidebarWidthKey[] = L"SidebarWidth";
+constexpr wchar_t kWindowLeftKey[] = L"Left";
+constexpr wchar_t kWindowTopKey[] = L"Top";
+constexpr wchar_t kWindowWidthKey[] = L"Width";
+constexpr wchar_t kWindowHeightKey[] = L"Height";
 constexpr wchar_t kFileListColumnWidthKeys[fileexplorer::Settings::kFileListColumnCount][32] = {
     L"FileListNameWidth",
     L"FileListExtensionWidth",
@@ -28,6 +36,8 @@ constexpr int kSidebarWidthMinLogical = 180;
 constexpr int kSidebarWidthMaxLogical = 900;
 constexpr int kColumnWidthMinLogical = 40;
 constexpr int kColumnWidthMaxLogical = 1800;
+constexpr int kWindowWidthMin = 720;
+constexpr int kWindowHeightMin = 480;
 
 void LogLastError(const wchar_t* context) {
     const DWORD error_code = GetLastError();
@@ -62,14 +72,43 @@ bool Settings::Load(Values* values) const {
 
     Values loaded = *values;
     if (storage_path_.empty()) {
+        if (loaded.theme.empty()) {
+            loaded.theme = L"dark";
+        }
         loaded.sidebar_width_logical = ClampSidebarWidthLogical(loaded.sidebar_width_logical);
         for (int i = 0; i < kFileListColumnCount; ++i) {
             loaded.file_list_column_widths_logical[static_cast<size_t>(i)] = ClampFileListColumnWidthLogical(
                 i,
                 loaded.file_list_column_widths_logical[static_cast<size_t>(i)]);
         }
+        loaded.window_width = (std::max)(kWindowWidthMin, loaded.window_width);
+        loaded.window_height = (std::max)(kWindowHeightMin, loaded.window_height);
         *values = loaded;
         return true;
+    }
+
+    loaded.show_hidden_files = GetPrivateProfileIntW(
+        kGeneralSection,
+        kShowHiddenFilesKey,
+        loaded.show_hidden_files ? 1 : 0,
+        storage_path_.c_str()) != 0;
+    loaded.show_extensions = GetPrivateProfileIntW(
+        kGeneralSection,
+        kShowExtensionsKey,
+        loaded.show_extensions ? 1 : 0,
+        storage_path_.c_str()) != 0;
+
+    wchar_t theme_buffer[64] = {};
+    const DWORD theme_chars = GetPrivateProfileStringW(
+        kGeneralSection,
+        kThemeKey,
+        loaded.theme.empty() ? L"dark" : loaded.theme.c_str(),
+        theme_buffer,
+        static_cast<DWORD>(_countof(theme_buffer)),
+        storage_path_.c_str());
+    loaded.theme = (theme_chars > 0) ? std::wstring(theme_buffer, theme_buffer + theme_chars) : L"dark";
+    if (loaded.theme.empty()) {
+        loaded.theme = L"dark";
     }
 
     const int stored_sidebar_width = static_cast<int>(GetPrivateProfileIntW(
@@ -87,6 +126,32 @@ bool Settings::Load(Values* values) const {
         loaded.file_list_column_widths_logical[static_cast<size_t>(i)] =
             ClampFileListColumnWidthLogical(i, stored_width);
     }
+
+    loaded.window_left = static_cast<int>(GetPrivateProfileIntW(
+        kWindowSection,
+        kWindowLeftKey,
+        loaded.window_left,
+        storage_path_.c_str()));
+    loaded.window_top = static_cast<int>(GetPrivateProfileIntW(
+        kWindowSection,
+        kWindowTopKey,
+        loaded.window_top,
+        storage_path_.c_str()));
+    loaded.window_width = (std::max)(
+        kWindowWidthMin,
+        static_cast<int>(GetPrivateProfileIntW(
+            kWindowSection,
+            kWindowWidthKey,
+            loaded.window_width,
+            storage_path_.c_str())));
+    loaded.window_height = (std::max)(
+        kWindowHeightMin,
+        static_cast<int>(GetPrivateProfileIntW(
+            kWindowSection,
+            kWindowHeightKey,
+            loaded.window_height,
+            storage_path_.c_str())));
+
     *values = loaded;
     return true;
 }
@@ -98,6 +163,30 @@ bool Settings::Save(const Values& values) const {
 
     const std::wstring parent = ParentDirectory(storage_path_);
     if (!parent.empty() && !EnsureDirectoryExists(parent)) {
+        return false;
+    }
+
+    if (!WritePrivateProfileStringW(
+            kGeneralSection,
+            kShowHiddenFilesKey,
+            values.show_hidden_files ? L"1" : L"0",
+            storage_path_.c_str())) {
+        LogLastError(L"WritePrivateProfileStringW(Settings ShowHiddenFiles)");
+        return false;
+    }
+
+    if (!WritePrivateProfileStringW(
+            kGeneralSection,
+            kShowExtensionsKey,
+            values.show_extensions ? L"1" : L"0",
+            storage_path_.c_str())) {
+        LogLastError(L"WritePrivateProfileStringW(Settings ShowExtensions)");
+        return false;
+    }
+
+    const wchar_t* theme_text = values.theme.empty() ? L"dark" : values.theme.c_str();
+    if (!WritePrivateProfileStringW(kGeneralSection, kThemeKey, theme_text, storage_path_.c_str())) {
+        LogLastError(L"WritePrivateProfileStringW(Settings Theme)");
         return false;
     }
 
@@ -124,6 +213,31 @@ bool Settings::Save(const Values& values) const {
             return false;
         }
     }
+
+    swprintf_s(buffer, L"%d", values.window_left);
+    if (!WritePrivateProfileStringW(kWindowSection, kWindowLeftKey, buffer, storage_path_.c_str())) {
+        LogLastError(L"WritePrivateProfileStringW(Settings WindowLeft)");
+        return false;
+    }
+
+    swprintf_s(buffer, L"%d", values.window_top);
+    if (!WritePrivateProfileStringW(kWindowSection, kWindowTopKey, buffer, storage_path_.c_str())) {
+        LogLastError(L"WritePrivateProfileStringW(Settings WindowTop)");
+        return false;
+    }
+
+    swprintf_s(buffer, L"%d", (std::max)(kWindowWidthMin, values.window_width));
+    if (!WritePrivateProfileStringW(kWindowSection, kWindowWidthKey, buffer, storage_path_.c_str())) {
+        LogLastError(L"WritePrivateProfileStringW(Settings WindowWidth)");
+        return false;
+    }
+
+    swprintf_s(buffer, L"%d", (std::max)(kWindowHeightMin, values.window_height));
+    if (!WritePrivateProfileStringW(kWindowSection, kWindowHeightKey, buffer, storage_path_.c_str())) {
+        LogLastError(L"WritePrivateProfileStringW(Settings WindowHeight)");
+        return false;
+    }
+
     return true;
 }
 

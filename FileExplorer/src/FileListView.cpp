@@ -52,6 +52,8 @@ constexpr UINT kMenuMakeFavourite = 7008;
 constexpr UINT kMenuMakeFlyoutFavourite = 7009;
 constexpr UINT kMenuOpenFileLocation = 7010;
 constexpr UINT kMenuNewFolder = 7011;
+constexpr UINT kMenuToggleShowHidden = 7012;
+constexpr UINT kMenuToggleShowExtensions = 7013;
 constexpr UINT_PTR kRenameEditSubclassId = 2;
 constexpr UINT kShellMenuCommandFirst = 7400;
 constexpr UINT kShellMenuCommandLast = 7599;
@@ -80,6 +82,14 @@ std::wstring ToLowerCopy(std::wstring value) {
         value.begin(),
         [](wchar_t ch) { return static_cast<wchar_t>(towlower(ch)); });
     return value;
+}
+
+std::wstring TrimExtensionForDisplay(const std::wstring& file_name) {
+    const std::wstring::size_type dot = file_name.find_last_of(L'.');
+    if (dot == std::wstring::npos || dot == 0) {
+        return file_name;
+    }
+    return file_name.substr(0, dot);
 }
 
 ULONGLONG FileTimeToUint64(const FILETIME& value) {
@@ -326,6 +336,13 @@ void FileListView::ApplyLoadedFolderEntries(std::vector<FileEntry> entries, bool
     UpdateItemCountAndRefresh(!incremental_refresh);
     if (incremental_refresh) {
         RestoreViewState(selected_names, focused_name, top_index);
+    } else if (has_pending_view_state_snapshot_) {
+        RestoreViewState(
+            pending_view_state_snapshot_.selected_names,
+            pending_view_state_snapshot_.focused_name,
+            pending_view_state_snapshot_.top_index);
+        has_pending_view_state_snapshot_ = false;
+        pending_view_state_snapshot_ = ViewStateSnapshot{};
     } else if (!post_load_selection_name_.empty()) {
         SelectSingleEntryByName(post_load_selection_name_);
     }
@@ -459,9 +476,45 @@ bool FileListView::RestoreSearchSnapshot(const SearchSnapshot& snapshot) {
     BuildDisplayEntriesWithGroups();
     UpdateSortIndicators();
     UpdateItemCountAndRefresh(true);
+    if (has_pending_view_state_snapshot_) {
+        RestoreViewState(
+            pending_view_state_snapshot_.selected_names,
+            pending_view_state_snapshot_.focused_name,
+            pending_view_state_snapshot_.top_index);
+        has_pending_view_state_snapshot_ = false;
+        pending_view_state_snapshot_ = ViewStateSnapshot{};
+    }
     SetLoadingState(false);
     PostStatusUpdate();
     return true;
+}
+
+bool FileListView::CaptureViewStateSnapshot(ViewStateSnapshot* snapshot) const {
+    if (snapshot == nullptr || hwnd_ == nullptr) {
+        return false;
+    }
+
+    snapshot->selected_names.clear();
+    snapshot->focused_name.clear();
+    snapshot->top_index = 0;
+    CaptureViewState(&snapshot->selected_names, &snapshot->focused_name, &snapshot->top_index);
+    return true;
+}
+
+void FileListView::SetPendingViewStateSnapshot(const ViewStateSnapshot* snapshot) {
+    if (snapshot == nullptr) {
+        has_pending_view_state_snapshot_ = false;
+        pending_view_state_snapshot_ = ViewStateSnapshot{};
+        return;
+    }
+
+    pending_view_state_snapshot_ = *snapshot;
+    has_pending_view_state_snapshot_ = true;
+}
+
+void FileListView::ClearPendingViewStateSnapshot() {
+    has_pending_view_state_snapshot_ = false;
+    pending_view_state_snapshot_ = ViewStateSnapshot{};
 }
 
 bool FileListView::LoadFolder(const std::wstring& path) {
@@ -492,7 +545,9 @@ bool FileListView::LoadFolder(const std::wstring& path) {
                 continue;
             }
 
-            if ((find_data.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0) {
+            const bool is_hidden = (find_data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+            const bool is_system = (find_data.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0;
+            if ((!show_hidden_files_ && is_hidden) || is_system) {
                 continue;
             }
 
@@ -534,6 +589,46 @@ bool FileListView::LoadFolder(const std::wstring& path) {
 
 const std::wstring& FileListView::current_path() const noexcept {
     return current_path_;
+}
+
+void FileListView::SetShowHiddenFiles(bool show_hidden_files) {
+    show_hidden_files_ = show_hidden_files;
+}
+
+bool FileListView::show_hidden_files() const noexcept {
+    return show_hidden_files_;
+}
+
+void FileListView::SetShowExtensions(bool show_extensions) {
+    if (show_extensions_ == show_extensions) {
+        return;
+    }
+    show_extensions_ = show_extensions;
+    ApplyColumnMode();
+}
+
+bool FileListView::show_extensions() const noexcept {
+    return show_extensions_;
+}
+
+void FileListView::SetSortOrder(SortColumn sort_column, SortDirection sort_direction) {
+    if (sort_column_ == sort_column && sort_direction_ == sort_direction) {
+        return;
+    }
+    sort_column_ = sort_column;
+    sort_direction_ = sort_direction;
+    SortBaseEntries();
+    BuildDisplayEntriesWithGroups();
+    UpdateSortIndicators();
+    UpdateItemCountAndRefresh(false);
+}
+
+SortColumn FileListView::sort_column() const noexcept {
+    return sort_column_;
+}
+
+SortDirection FileListView::sort_direction() const noexcept {
+    return sort_direction_;
 }
 
 void FileListView::SetColumnWidthsLogical(const ColumnWidthsLogical& widths) {
@@ -742,7 +837,9 @@ void FileListView::CreateColumns() {
         column.fmt = columns[i].format;
         const int logical_width = column_widths_logical_[static_cast<size_t>(i)];
         const int width_px = MulDiv(logical_width, static_cast<int>(dpi_), 96);
-        column.cx = (i == 4 && !search_mode_) ? 0 : width_px;
+        const bool hide_path = (i == 4 && !search_mode_);
+        const bool hide_extension = (i == 1 && !show_extensions_);
+        column.cx = (hide_path || hide_extension) ? 0 : width_px;
         column.pszText = const_cast<LPWSTR>(columns[i].title);
         column.iSubItem = i;
         if (ListView_InsertColumn(hwnd_, i, &column) == -1) {
@@ -759,7 +856,9 @@ void FileListView::ApplyScaledColumns() {
     for (int i = 0; i < kColumnCount; ++i) {
         const int logical_width = ClampColumnWidthLogical(i, column_widths_logical_[static_cast<size_t>(i)]);
         const int width_px = MulDiv(logical_width, static_cast<int>(dpi_), 96);
-        const int applied_width = (i == 4 && !search_mode_) ? 0 : width_px;
+        const bool hide_path = (i == 4 && !search_mode_);
+        const bool hide_extension = (i == 1 && !show_extensions_);
+        const int applied_width = (hide_path || hide_extension) ? 0 : width_px;
         ListView_SetColumnWidth(hwnd_, i, applied_width);
     }
 }
@@ -885,7 +984,7 @@ bool FileListView::HandleGetDispInfo(NMLVDISPINFOW* info) const {
         } else {
             switch (info->item.iSubItem) {
             case 0:
-                text = entry.name;
+                text = BuildDisplayName(entry);
                 break;
             case 1:
                 text = entry.is_folder ? L"" : entry.extension;
@@ -935,6 +1034,14 @@ bool FileListView::HandleColumnClick(int column_index) {
     UpdateSortIndicators();
     UpdateItemCountAndRefresh(true);
     PostStatusUpdate();
+
+    if (parent_hwnd_ != nullptr && !search_mode_) {
+        PostMessageW(
+            parent_hwnd_,
+            WM_FE_FILELIST_SORT_CHANGED,
+            static_cast<WPARAM>(sort_column_),
+            static_cast<LPARAM>(sort_direction_ == SortDirection::Ascending ? 0 : 1));
+    }
     return true;
 }
 
@@ -2077,6 +2184,17 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuMakeFavourite, L"Make Favourite");
     AppendMenuW(menu, MF_STRING, kMenuMakeFlyoutFavourite, L"Make Flyout Favourite");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(
+        menu,
+        MF_STRING | (show_hidden_files_ ? MF_CHECKED : MF_UNCHECKED),
+        kMenuToggleShowHidden,
+        L"Show hidden files");
+    AppendMenuW(
+        menu,
+        MF_STRING | (show_extensions_ ? MF_CHECKED : MF_UNCHECKED),
+        kMenuToggleShowExtensions,
+        L"Show file extensions");
 
     const int target_index = ResolveContextTargetIndex(hit_index);
     const bool has_target = IsSelectableIndex(target_index);
@@ -2230,6 +2348,20 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
 
         case kMenuNewFolder:
             CreateNewFolderAndBeginRename();
+            break;
+
+        case kMenuToggleShowHidden:
+            if (parent_hwnd_ != nullptr &&
+                !PostMessageW(parent_hwnd_, WM_FE_FILELIST_TOGGLE_SHOW_HIDDEN, 0, 0)) {
+                LogLastError(L"PostMessageW(WM_FE_FILELIST_TOGGLE_SHOW_HIDDEN)");
+            }
+            break;
+
+        case kMenuToggleShowExtensions:
+            if (parent_hwnd_ != nullptr &&
+                !PostMessageW(parent_hwnd_, WM_FE_FILELIST_TOGGLE_SHOW_EXTENSIONS, 0, 0)) {
+                LogLastError(L"PostMessageW(WM_FE_FILELIST_TOGGLE_SHOW_EXTENSIONS)");
+            }
             break;
 
         default:
@@ -2780,7 +2912,7 @@ void FileListView::CaptureCurrentColumnWidths() {
     }
 
     for (int i = 0; i < kColumnCount; ++i) {
-        if (i == 4 && !search_mode_) {
+        if ((i == 4 && !search_mode_) || (i == 1 && !show_extensions_)) {
             continue;
         }
 
@@ -2929,6 +3061,13 @@ void FileListView::ClearShellContextMenu() {
     }
     shell_context_menu_first_id_ = 0;
     shell_context_menu_last_id_ = 0;
+}
+
+std::wstring FileListView::BuildDisplayName(const FileEntry& entry) const {
+    if (entry.is_folder || show_extensions_) {
+        return entry.name;
+    }
+    return TrimExtensionForDisplay(entry.name);
 }
 
 void FileListView::DrawEmptyState(HDC hdc) const {

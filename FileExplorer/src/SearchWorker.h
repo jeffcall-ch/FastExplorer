@@ -20,6 +20,7 @@ public:
     struct Request {
         std::wstring root_path;
         std::wstring pattern;
+        bool show_hidden_files = false;
         uint64_t generation = 0;
         HWND hwnd_target = nullptr;
         std::shared_ptr<const std::atomic<uint64_t>> generation_source;

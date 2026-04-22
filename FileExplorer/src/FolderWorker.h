@@ -19,6 +19,7 @@ class FolderWorker final {
 public:
     struct Request {
         std::wstring path;
+        bool show_hidden_files = false;
         uint64_t generation = 0;
         HWND hwnd_target = nullptr;
         std::shared_ptr<const std::atomic<uint64_t>> generation_source;
@@ -28,7 +29,7 @@ public:
 
 private:
     static void Run(Request request);
-    static std::vector<FileEntry> EnumerateEntries(const std::wstring& path);
+    static std::vector<FileEntry> EnumerateEntries(const std::wstring& path, bool show_hidden_files);
     static std::wstring NormalizePath(std::wstring path);
     static std::wstring BuildFullPath(const std::wstring& parent, const std::wstring& name);
     static std::wstring GetExtensionFromName(const std::wstring& name);

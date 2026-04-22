@@ -123,7 +123,9 @@ void SearchWorker::Run(Request request) {
                 continue;
             }
 
-            if ((find_data.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0) {
+            const bool is_hidden = (find_data.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+            const bool is_system = (find_data.dwFileAttributes & FILE_ATTRIBUTE_SYSTEM) != 0;
+            if ((!request.show_hidden_files && is_hidden) || is_system) {
                 continue;
             }
 

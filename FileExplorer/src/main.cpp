@@ -11,8 +11,7 @@
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE previous_instance, PWSTR command_line, int show_command) {
     (void)previous_instance;
-    (void)command_line;
 
     fileexplorer::App app;
-    return app.Run(instance, show_command);
+    return app.Run(instance, show_command, command_line);
 }

@@ -30,6 +30,11 @@ constexpr int kControlIdStatusBar = 1005;
 constexpr int kControlIdSidebarSplitter = 1006;
 
 constexpr int kMinMainPaneWidthLogical = 280;
+constexpr int kWindowWidthMin = 720;
+constexpr int kWindowHeightMin = 480;
+
+constexpr UINT kMenuViewShowHidden = 40001;
+constexpr UINT kMenuViewShowExtensions = 40002;
 
 constexpr UINT_PTR kFolderRefreshDebounceTimerId = 9201;
 constexpr UINT kFolderRefreshDebounceMs = 500;
@@ -141,6 +146,58 @@ std::wstring LeafName(const std::wstring& path) {
     return normalized.substr(separator + 1);
 }
 
+void BringWindowToForeground(HWND hwnd) {
+    if (hwnd == nullptr) {
+        return;
+    }
+
+    if (IsIconic(hwnd)) {
+        ShowWindow(hwnd, SW_RESTORE);
+    } else {
+        ShowWindow(hwnd, SW_SHOW);
+    }
+
+    if (SetForegroundWindow(hwnd)) {
+        return;
+    }
+
+    const HWND foreground = GetForegroundWindow();
+    if (foreground == nullptr || foreground == hwnd) {
+        if (!BringWindowToTop(hwnd)) {
+            LogLastError(L"BringWindowToTop(IPCForeground)");
+        }
+        SetActiveWindow(hwnd);
+        return;
+    }
+
+    const DWORD current_thread_id = GetCurrentThreadId();
+    DWORD foreground_process_id = 0;
+    const DWORD foreground_thread_id = GetWindowThreadProcessId(foreground, &foreground_process_id);
+
+    if (foreground_thread_id != 0 && foreground_thread_id != current_thread_id) {
+        if (AttachThreadInput(current_thread_id, foreground_thread_id, TRUE)) {
+            if (!BringWindowToTop(hwnd)) {
+                LogLastError(L"BringWindowToTop(IPCForegroundAttached)");
+            }
+            SetForegroundWindow(hwnd);
+            SetActiveWindow(hwnd);
+            if (!AttachThreadInput(current_thread_id, foreground_thread_id, FALSE)) {
+                LogLastError(L"AttachThreadInput(Detach)");
+            }
+            if (GetForegroundWindow() == hwnd) {
+                return;
+            }
+        } else {
+            LogLastError(L"AttachThreadInput(Attach)");
+        }
+    }
+
+    if (!BringWindowToTop(hwnd)) {
+        LogLastError(L"BringWindowToTop(IPCForegroundFallback)");
+    }
+    SetActiveWindow(hwnd);
+}
+
 }  // namespace
 
 namespace fileexplorer {
@@ -174,6 +231,10 @@ bool MainWindow::Create(HINSTANCE instance, int show_command) {
         return false;
     }
 
+    LoadLayoutSettings();
+    sort_settings_.Load();
+    LoadSessionState();
+
     if (!CreateMainWindow(show_command)) {
         return false;
     }
@@ -194,15 +255,14 @@ int MainWindow::MessageLoop() {
             return static_cast<int>(message.wParam);
         }
 
-        // Ensure Ctrl+T/Ctrl+W tab shortcuts work even when focus is inside child controls.
+        // Ensure Ctrl+tab shortcuts work even when focus is inside child controls.
         if (message.message == WM_KEYDOWN) {
             const bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
             if (ctrl_down &&
-                (message.wParam == 'T' || message.wParam == 't' ||
-                 message.wParam == 'W' || message.wParam == 'w') &&
                 hwnd_ != nullptr &&
                 (message.hwnd == hwnd_ || IsChild(hwnd_, message.hwnd))) {
-                if (HandleTabKeyboardShortcut(message.wParam, true, false)) {
+                const bool shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+                if (HandleTabKeyboardShortcut(message.wParam, true, shift_down)) {
                     continue;
                 }
             }
@@ -260,17 +320,31 @@ bool MainWindow::RegisterWindowClass() {
 bool MainWindow::CreateMainWindow(int show_command) {
     const DWORD window_style = WS_OVERLAPPEDWINDOW;
     const DWORD window_ex_style = 0;
-    const RECT positioned_rect = CenteredWindowRect(window_style, window_ex_style);
-    const int width = positioned_rect.right - positioned_rect.left;
-    const int height = positioned_rect.bottom - positioned_rect.top;
+    RECT positioned_rect = CenteredWindowRect(window_style, window_ex_style);
+    int width = positioned_rect.right - positioned_rect.left;
+    int height = positioned_rect.bottom - positioned_rect.top;
+    int left = positioned_rect.left;
+    int top = positioned_rect.top;
+
+    const int requested_width = (std::max)(kWindowWidthMin, settings_values_.window_width);
+    const int requested_height = (std::max)(kWindowHeightMin, settings_values_.window_height);
+    const bool has_saved_window_rect =
+        settings_values_.window_width > 0 &&
+        settings_values_.window_height > 0;
+    if (has_saved_window_rect) {
+        width = requested_width;
+        height = requested_height;
+        left = settings_values_.window_left;
+        top = settings_values_.window_top;
+    }
 
     hwnd_ = CreateWindowExW(
         window_ex_style,
         kMainWindowClassName,
         kInitialWindowTitle,
         window_style,
-        positioned_rect.left,
-        positioned_rect.top,
+        left,
+        top,
         width,
         height,
         nullptr,
@@ -433,24 +507,153 @@ void MainWindow::RecalculateLayout() {
     metrics_ = ScaleLayoutMetrics(dpi_);
 }
 
-void MainWindow::LoadLayoutSettings() {
-    Settings::Values values = {};
-    values.sidebar_width_logical = sidebar_width_logical_;
-    values.file_list_column_widths_logical = file_list_column_widths_logical_;
-    if (!settings_.Load(&values)) {
+void MainWindow::InitializeMainMenu() {
+    if (hwnd_ == nullptr || main_menu_ != nullptr) {
         return;
     }
-    sidebar_width_logical_ = Settings::ClampSidebarWidthLogical(values.sidebar_width_logical);
-    file_list_column_widths_logical_ = values.file_list_column_widths_logical;
+
+    main_menu_ = CreateMenu();
+    if (main_menu_ == nullptr) {
+        LogLastError(L"CreateMenu(Main)");
+        return;
+    }
+
+    view_menu_ = CreatePopupMenu();
+    if (view_menu_ == nullptr) {
+        LogLastError(L"CreatePopupMenu(View)");
+        return;
+    }
+
+    if (!AppendMenuW(view_menu_, MF_STRING, kMenuViewShowHidden, L"Show hidden files")) {
+        LogLastError(L"AppendMenuW(ShowHidden)");
+    }
+    if (!AppendMenuW(view_menu_, MF_STRING, kMenuViewShowExtensions, L"Show file extensions")) {
+        LogLastError(L"AppendMenuW(ShowExtensions)");
+    }
+    if (!AppendMenuW(main_menu_, MF_POPUP, reinterpret_cast<UINT_PTR>(view_menu_), L"View")) {
+        LogLastError(L"AppendMenuW(ViewPopup)");
+    }
+    if (!SetMenu(hwnd_, main_menu_)) {
+        LogLastError(L"SetMenu(Main)");
+    }
+
+    UpdateViewMenuChecks();
+}
+
+void MainWindow::UpdateViewMenuChecks() {
+    if (view_menu_ == nullptr) {
+        return;
+    }
+
+    CheckMenuItem(
+        view_menu_,
+        kMenuViewShowHidden,
+        MF_BYCOMMAND | (settings_values_.show_hidden_files ? MF_CHECKED : MF_UNCHECKED));
+    CheckMenuItem(
+        view_menu_,
+        kMenuViewShowExtensions,
+        MF_BYCOMMAND | (settings_values_.show_extensions ? MF_CHECKED : MF_UNCHECKED));
+}
+
+void MainWindow::ToggleShowHiddenFiles() {
+    settings_values_.show_hidden_files = !settings_values_.show_hidden_files;
+    file_list_view_.SetShowHiddenFiles(settings_values_.show_hidden_files);
+    UpdateViewMenuChecks();
+    DrawMenuBar(hwnd_);
+
+    if (file_list_view_.IsSearchMode() || search_active_) {
+        StartSearch(search_pattern_.empty() ? L"*" : search_pattern_);
+    } else if (const TabState* active = tab_manager_.active_tab(); active != nullptr) {
+        StartFolderLoad(active->path, true);
+        RestartFolderWatcher(active->path);
+    }
+}
+
+void MainWindow::ToggleShowExtensions() {
+    settings_values_.show_extensions = !settings_values_.show_extensions;
+    file_list_view_.SetShowExtensions(settings_values_.show_extensions);
+    UpdateViewMenuChecks();
+    DrawMenuBar(hwnd_);
+}
+
+void MainWindow::LoadLayoutSettings() {
+    settings_values_.sidebar_width_logical = sidebar_width_logical_;
+    settings_values_.file_list_column_widths_logical = file_list_column_widths_logical_;
+    settings_.Load(&settings_values_);
+
+    sidebar_width_logical_ = Settings::ClampSidebarWidthLogical(settings_values_.sidebar_width_logical);
+    file_list_column_widths_logical_ = settings_values_.file_list_column_widths_logical;
+
+    if (settings_values_.theme.empty()) {
+        settings_values_.theme = L"dark";
+    }
+
+    file_list_view_.SetShowHiddenFiles(settings_values_.show_hidden_files);
+    file_list_view_.SetShowExtensions(settings_values_.show_extensions);
+
+    const std::wstring settings_directory = ParentPath(settings_.storage_path());
+    if (!settings_directory.empty()) {
+        session_store_.SetStoragePath(settings_directory + L"\\session.ini");
+        sort_settings_.SetStoragePath(settings_directory + L"\\sort_settings.csv");
+    } else {
+        session_store_.UseDefaultStoragePath();
+        sort_settings_.UseDefaultStoragePath();
+    }
+}
+
+void MainWindow::LoadSessionState() {
+    int active_index = 0;
+    const std::vector<SessionStore::SessionTab> session_tabs = session_store_.Load(&active_index);
+    if (session_tabs.empty()) {
+        return;
+    }
+
+    std::vector<TabManager::SessionTab> tabs;
+    tabs.reserve(session_tabs.size());
+    for (const SessionStore::SessionTab& session_tab : session_tabs) {
+        if (session_tab.path.empty()) {
+            continue;
+        }
+        tabs.push_back({session_tab.path, session_tab.pinned});
+    }
+    if (tabs.empty()) {
+        return;
+    }
+    tab_manager_.RestoreSession(tabs, active_index);
+}
+
+void MainWindow::SaveSessionState() const {
+    std::vector<SessionStore::SessionTab> tabs;
+    const auto session_tabs = tab_manager_.CaptureSession();
+    tabs.reserve(session_tabs.size());
+    for (const TabManager::SessionTab& session_tab : session_tabs) {
+        tabs.push_back({session_tab.path, session_tab.pinned});
+    }
+    session_store_.Save(tabs, tab_manager_.active_index());
 }
 
 void MainWindow::SaveLayoutSettings() const {
-    Settings::Values values = {};
+    Settings::Values values = settings_values_;
     values.sidebar_width_logical = Settings::ClampSidebarWidthLogical(sidebar_width_logical_);
     values.file_list_column_widths_logical =
         (file_list_hwnd_ != nullptr)
         ? file_list_view_.GetColumnWidthsLogical()
         : file_list_column_widths_logical_;
+    values.show_hidden_files = settings_values_.show_hidden_files;
+    values.show_extensions = settings_values_.show_extensions;
+    values.theme = settings_values_.theme.empty() ? L"dark" : settings_values_.theme;
+
+    if (hwnd_ != nullptr) {
+        WINDOWPLACEMENT placement = {};
+        placement.length = sizeof(placement);
+        if (GetWindowPlacement(hwnd_, &placement)) {
+            const RECT rect = placement.rcNormalPosition;
+            values.window_left = rect.left;
+            values.window_top = rect.top;
+            values.window_width = (std::max)(kWindowWidthMin, static_cast<int>(rect.right - rect.left));
+            values.window_height = (std::max)(kWindowHeightMin, static_cast<int>(rect.bottom - rect.top));
+        }
+    }
     settings_.Save(values);
 }
 
@@ -727,6 +930,7 @@ void MainWindow::UpdateWindowTitle() {
 
 void MainWindow::HandleTabStateChanged() {
     PruneSearchSnapshots();
+    PruneViewSnapshots();
     tab_strip_.Refresh();
 
     const TabState* active = tab_manager_.active_tab();
@@ -734,6 +938,10 @@ void MainWindow::HandleTabStateChanged() {
     const bool tab_switched = last_active_tab_id_ != 0 && last_active_tab_id_ != active_tab_id;
     if (tab_switched) {
         StoreSearchSnapshotForTab(last_active_tab_id_);
+        StoreViewSnapshotForTab(last_active_tab_id_);
+    }
+    if (!tab_switched) {
+        file_list_view_.ClearPendingViewStateSnapshot();
     }
 
     if (active != nullptr) {
@@ -743,6 +951,7 @@ void MainWindow::HandleTabStateChanged() {
         const auto snapshot_it = search_snapshots_.find(active->id);
         if (tab_switched && snapshot_it != search_snapshots_.end()) {
             CancelSearchWorker();
+            ApplyPendingViewSnapshotForTab(active->id);
             if (file_list_view_.RestoreSearchSnapshot(snapshot_it->second)) {
                 sidebar_.SetSearchText(snapshot_it->second.pattern);
                 pending_post_load_selection_name_.clear();
@@ -754,6 +963,9 @@ void MainWindow::HandleTabStateChanged() {
                 RestartFolderWatcher(active->path);
             }
         } else {
+            if (tab_switched) {
+                ApplyPendingViewSnapshotForTab(active->id);
+            }
             const std::wstring post_load_selection_name = std::move(pending_post_load_selection_name_);
             pending_post_load_selection_name_.clear();
             StartFolderLoad(active->path, false, post_load_selection_name);
@@ -768,6 +980,10 @@ void MainWindow::HandleTabStateChanged() {
         tab_manager_.CanNavigateBack(),
         tab_manager_.CanNavigateForward(),
         tab_manager_.CanNavigateUp());
+
+    if (tab_switched && file_list_hwnd_ != nullptr && GetForegroundWindow() == hwnd_) {
+        SetFocus(file_list_hwnd_);
+    }
 
     UpdateWindowTitle();
     last_active_tab_id_ = active_tab_id;
@@ -784,6 +1000,8 @@ void MainWindow::StartFolderLoad(
     }
 
     const std::wstring normalized_path = NormalizePath(path);
+    const SortSettings::Entry sort_entry = sort_settings_.Get(normalized_path);
+    file_list_view_.SetSortOrder(sort_entry.sort_column, sort_entry.sort_direction);
     pending_incremental_refresh_ = incremental_refresh;
     if (incremental_refresh) {
         file_list_view_.SetPostLoadSelectionName(L"");
@@ -795,6 +1013,7 @@ void MainWindow::StartFolderLoad(
     const uint64_t generation = ++(*folder_generation_source_);
     FolderWorker::Request request = {};
     request.path = normalized_path;
+    request.show_hidden_files = settings_values_.show_hidden_files;
     request.generation = generation;
     request.hwnd_target = hwnd_;
     request.generation_source = folder_generation_source_;
@@ -832,6 +1051,7 @@ void MainWindow::StartSearch(const std::wstring& pattern) {
     SearchWorker::Request request = {};
     request.root_path = search_root_path_;
     request.pattern = search_pattern_;
+    request.show_hidden_files = settings_values_.show_hidden_files;
     request.generation = generation;
     request.hwnd_target = hwnd_;
     request.generation_source = search_generation_source_;
@@ -915,6 +1135,63 @@ void MainWindow::PruneSearchSnapshots() {
     for (auto it = search_snapshots_.begin(); it != search_snapshots_.end();) {
         if (!live_tab_ids.contains(it->first)) {
             it = search_snapshots_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+void MainWindow::StoreViewSnapshotForTab(uint64_t tab_id) {
+    if (tab_id == 0) {
+        return;
+    }
+
+    const auto& tabs = tab_manager_.tabs();
+    const bool tab_exists = std::any_of(
+        tabs.begin(),
+        tabs.end(),
+        [tab_id](const TabState& tab) { return tab.id == tab_id; });
+    if (!tab_exists) {
+        return;
+    }
+
+    FileListView::ViewStateSnapshot snapshot = {};
+    if (file_list_view_.CaptureViewStateSnapshot(&snapshot)) {
+        view_snapshots_[tab_id] = std::move(snapshot);
+    } else {
+        view_snapshots_.erase(tab_id);
+    }
+}
+
+void MainWindow::ApplyPendingViewSnapshotForTab(uint64_t tab_id) {
+    if (tab_id == 0) {
+        file_list_view_.ClearPendingViewStateSnapshot();
+        return;
+    }
+
+    const auto it = view_snapshots_.find(tab_id);
+    if (it == view_snapshots_.end()) {
+        file_list_view_.ClearPendingViewStateSnapshot();
+        return;
+    }
+
+    file_list_view_.SetPendingViewStateSnapshot(&it->second);
+}
+
+void MainWindow::PruneViewSnapshots() {
+    if (view_snapshots_.empty()) {
+        return;
+    }
+
+    std::unordered_set<uint64_t> live_tab_ids;
+    live_tab_ids.reserve(tab_manager_.tabs().size());
+    for (const TabState& tab : tab_manager_.tabs()) {
+        live_tab_ids.insert(tab.id);
+    }
+
+    for (auto it = view_snapshots_.begin(); it != view_snapshots_.end();) {
+        if (!live_tab_ids.contains(it->first)) {
+            it = view_snapshots_.erase(it);
         } else {
             ++it;
         }
@@ -1243,12 +1520,16 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
             dpi_ = 96U;
         }
         RecalculateLayout();
-        LoadLayoutSettings();
         CreateZoneBrushes();
         if (!InitializeChildZones()) {
             return -1;
         }
+        if (!SetMenu(hwnd_, nullptr)) {
+            LogLastError(L"SetMenu(RemoveTopMenu)");
+        }
         file_list_view_.SetColumnWidthsLogical(file_list_column_widths_logical_);
+        file_list_view_.SetShowHiddenFiles(settings_values_.show_hidden_files);
+        file_list_view_.SetShowExtensions(settings_values_.show_extensions);
         ApplyWindowChrome();
         UpdateWindowTitle();
         LayoutChildZones();
@@ -1284,6 +1565,22 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
             return 0;
         }
         break;
+
+    case WM_COMMAND: {
+        switch (LOWORD(w_param)) {
+        case kMenuViewShowHidden:
+            ToggleShowHiddenFiles();
+            return 0;
+
+        case kMenuViewShowExtensions:
+            ToggleShowExtensions();
+            return 0;
+
+        default:
+            break;
+        }
+        break;
+    }
 
     case WM_NCHITTEST: {
         const LRESULT hit = DefWindowProcW(hwnd_, message, w_param, l_param);
@@ -1398,6 +1695,35 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         return 0;
     }
 
+    case WM_FE_IPC_OPEN_PATH: {
+        auto requested_path = std::unique_ptr<std::wstring>(reinterpret_cast<std::wstring*>(l_param));
+
+        BringWindowToForeground(hwnd_);
+
+        if (requested_path) {
+            const std::wstring target_path = NormalizePath(*requested_path);
+            if (!target_path.empty()) {
+                const auto& tabs = tab_manager_.tabs();
+                int existing_index = -1;
+                for (int i = 0; i < static_cast<int>(tabs.size()); ++i) {
+                    if (PathsEqualInsensitive(tabs[i].path, target_path)) {
+                        existing_index = i;
+                        break;
+                    }
+                }
+
+                if (existing_index >= 0) {
+                    if (tab_manager_.Activate(existing_index)) {
+                        HandleTabStateChanged();
+                    }
+                } else if (tab_manager_.AddTab(target_path, true, false) >= 0) {
+                    HandleTabStateChanged();
+                }
+            }
+        }
+        return 0;
+    }
+
     case WM_FE_SIDEBAR_SEARCH_REQUEST: {
         auto search_pattern = std::unique_ptr<std::wstring>(reinterpret_cast<std::wstring*>(l_param));
         if (search_pattern != nullptr) {
@@ -1471,6 +1797,27 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
             StartFolderLoad(active->path, true);
             RestartFolderWatcher(active->path);
         }
+        return 0;
+
+    case WM_FE_FILELIST_SORT_CHANGED:
+        if (!file_list_view_.IsSearchMode()) {
+            const SortColumn sort_column = static_cast<SortColumn>(w_param);
+            const SortDirection sort_direction = (l_param == 0)
+                ? SortDirection::Ascending
+                : SortDirection::Descending;
+            if (const TabState* active = tab_manager_.active_tab(); active != nullptr) {
+                sort_settings_.Set(active->path, sort_column, sort_direction);
+                sort_settings_.Save();
+            }
+        }
+        return 0;
+
+    case WM_FE_FILELIST_TOGGLE_SHOW_HIDDEN:
+        ToggleShowHiddenFiles();
+        return 0;
+
+    case WM_FE_FILELIST_TOGGLE_SHOW_EXTENSIONS:
+        ToggleShowExtensions();
         return 0;
 
     case WM_FE_FILELIST_STATUS_UPDATE: {
@@ -1689,7 +2036,9 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         KillTimer(hwnd_, kFolderRefreshDebounceTimerId);
         pending_debounced_refresh_ = false;
         pending_debounced_refresh_generation_ = 0;
+        SaveSessionState();
         SaveLayoutSettings();
+        sort_settings_.Save();
         CancelSearchWorker();
         StopFolderWatcher();
         PostQuitMessage(0);

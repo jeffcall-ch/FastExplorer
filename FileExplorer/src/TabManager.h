@@ -17,6 +17,11 @@ struct TabState {
 
 class TabManager final {
 public:
+    struct SessionTab {
+        std::wstring path;
+        bool pinned = false;
+    };
+
     TabManager();
 
     const std::vector<TabState>& tabs() const noexcept;
@@ -38,6 +43,7 @@ public:
 
     bool TogglePin(int index);
     bool DuplicateTab(int index);
+    bool MoveTab(int from_index, int to_index);
 
     bool NavigateTo(const std::wstring& path);
     bool NavigateBack();
@@ -48,6 +54,9 @@ public:
     bool CanNavigateBack() const;
     bool CanNavigateForward() const;
     bool CanNavigateUp() const;
+
+    std::vector<SessionTab> CaptureSession() const;
+    bool RestoreSession(const std::vector<SessionTab>& tabs, int active_index);
 
     static std::wstring DefaultTabPath();
     static std::wstring BuildDisplayName(const std::wstring& path);

@@ -73,7 +73,11 @@ private:
     void HandleMouseMove(POINT point);
     void HandleMouseLeave();
     void HandleLeftButtonDown(POINT point);
+    void HandleLeftButtonUp(POINT point);
     void HandleRightClick(POINT point_screen, POINT point_client);
+    void HandleTabDragMove(POINT point);
+    void ResetTabDragState(bool release_capture);
+    int TabIndexForDragPoint(POINT point) const;
     void ShowTabContextMenu(int tab_index, POINT point_screen);
     void NotifyParentTabsChanged() const;
 
@@ -110,6 +114,12 @@ private:
 
     int tooltip_tab_index_{-1};
     std::array<wchar_t, 1024> tooltip_buffer_{};
+
+    int drag_candidate_tab_index_{-1};
+    int drag_tab_index_{-1};
+    POINT drag_start_point_{};
+    bool tab_dragging_{false};
+    bool tab_reordered_during_drag_{false};
 
     UniqueFont font_{nullptr};
     int font_pixel_height_{0};

@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cwchar>
+#include <cstdlib>
 
 namespace {
 
@@ -403,6 +404,11 @@ void TabStrip::RebuildLayout(HDC hdc) {
 }
 
 void TabStrip::HandleMouseMove(POINT point) {
+    if (drag_candidate_tab_index_ >= 0) {
+        HandleTabDragMove(point);
+        return;
+    }
+
     TRACKMOUSEEVENT track = {};
     track.cbSize = sizeof(track);
     track.dwFlags = TME_LEAVE;
@@ -445,6 +451,10 @@ void TabStrip::HandleMouseMove(POINT point) {
 }
 
 void TabStrip::HandleMouseLeave() {
+    if (drag_candidate_tab_index_ >= 0) {
+        return;
+    }
+
     hovered_tab_index_ = -1;
     hovered_close_tab_index_ = -1;
     hovered_plus_button_ = false;
@@ -476,7 +486,15 @@ void TabStrip::HandleLeftButtonDown(POINT point) {
         break;
 
     case HitPart::TabBody:
-        tabs_changed = tab_manager_->Activate(hit.tabIndex);
+        if (tab_manager_->active_index() != hit.tabIndex) {
+            tabs_changed = tab_manager_->Activate(hit.tabIndex);
+        }
+        drag_candidate_tab_index_ = hit.tabIndex;
+        drag_tab_index_ = hit.tabIndex;
+        drag_start_point_ = point;
+        tab_dragging_ = false;
+        tab_reordered_during_drag_ = false;
+        SetCapture(hwnd_);
         break;
 
     case HitPart::LeftScroll:
@@ -494,6 +512,7 @@ void TabStrip::HandleLeftButtonDown(POINT point) {
         break;
 
     case HitPart::None:
+        ResetTabDragState(true);
         break;
     }
 
@@ -503,6 +522,86 @@ void TabStrip::HandleLeftButtonDown(POINT point) {
     if (tabs_changed || redraw_only) {
         Refresh();
     }
+}
+
+void TabStrip::HandleLeftButtonUp(POINT point) {
+    if (drag_candidate_tab_index_ >= 0) {
+        HandleTabDragMove(point);
+        if (tab_reordered_during_drag_) {
+            Refresh();
+        }
+    }
+
+    ResetTabDragState(true);
+}
+
+void TabStrip::HandleTabDragMove(POINT point) {
+    if (tab_manager_ == nullptr || drag_candidate_tab_index_ < 0 || drag_tab_index_ < 0) {
+        return;
+    }
+
+    if (!tab_dragging_) {
+        const int drag_threshold_x = (std::max)(1, GetSystemMetrics(SM_CXDRAG));
+        const int drag_threshold_y = (std::max)(1, GetSystemMetrics(SM_CYDRAG));
+        const int delta_x = std::abs(point.x - drag_start_point_.x);
+        const int delta_y = std::abs(point.y - drag_start_point_.y);
+        if (delta_x < drag_threshold_x && delta_y < drag_threshold_y) {
+            return;
+        }
+        tab_dragging_ = true;
+    }
+
+    const int target_index = TabIndexForDragPoint(point);
+    if (target_index < 0 || target_index == drag_tab_index_) {
+        return;
+    }
+
+    if (tab_manager_->MoveTab(drag_tab_index_, target_index)) {
+        drag_tab_index_ = target_index;
+        tab_reordered_during_drag_ = true;
+        hovered_tab_index_ = drag_tab_index_;
+        hovered_close_tab_index_ = -1;
+        Refresh();
+    }
+}
+
+void TabStrip::ResetTabDragState(bool release_capture) {
+    if (release_capture && hwnd_ != nullptr && GetCapture() == hwnd_) {
+        ReleaseCapture();
+    }
+    drag_candidate_tab_index_ = -1;
+    drag_tab_index_ = -1;
+    tab_dragging_ = false;
+    tab_reordered_during_drag_ = false;
+    drag_start_point_ = POINT{0, 0};
+}
+
+int TabStrip::TabIndexForDragPoint(POINT point) const {
+    if (tab_manager_ == nullptr) {
+        return -1;
+    }
+    if (visible_tabs_.empty()) {
+        return -1;
+    }
+
+    for (const VisibleTab& tab : visible_tabs_) {
+        if (RectContainsPoint(tab.tabRect, point)) {
+            const int center_x = tab.tabRect.left + ((tab.tabRect.right - tab.tabRect.left) / 2);
+            if (point.x >= center_x && tab.tabIndex < static_cast<int>(tab_manager_->tabs().size()) - 1) {
+                return tab.tabIndex + 1;
+            }
+            return tab.tabIndex;
+        }
+    }
+
+    if (point.x < visible_tabs_.front().tabRect.left) {
+        return visible_tabs_.front().tabIndex;
+    }
+    if (point.x >= visible_tabs_.back().tabRect.right) {
+        return visible_tabs_.back().tabIndex;
+    }
+
+    return -1;
 }
 
 void TabStrip::HandleRightClick(POINT point_screen, POINT point_client) {
@@ -869,6 +968,12 @@ LRESULT TabStrip::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
         return 0;
     }
 
+    case WM_LBUTTONUP: {
+        POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+        HandleLeftButtonUp(point);
+        return 0;
+    }
+
     case WM_RBUTTONUP: {
         POINT client_point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
         POINT screen_point = client_point;
@@ -916,7 +1021,14 @@ LRESULT TabStrip::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
         break;
     }
 
+    case WM_CAPTURECHANGED:
+        if (reinterpret_cast<HWND>(l_param) != hwnd_) {
+            ResetTabDragState(false);
+        }
+        return 0;
+
     case WM_NCDESTROY:
+        ResetTabDragState(false);
         SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
         hwnd_ = nullptr;
         break;

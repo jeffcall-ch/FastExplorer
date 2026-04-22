@@ -286,6 +286,29 @@ bool TabManager::DuplicateTab(int index) {
     return true;
 }
 
+bool TabManager::MoveTab(int from_index, int to_index) {
+    if (!IsValidIndex(from_index) || !IsValidIndex(to_index) || from_index == to_index) {
+        return false;
+    }
+
+    const uint64_t active_tab_id = IsValidIndex(active_index_) ? tabs_[active_index_].id : 0;
+    TabState moved_tab = std::move(tabs_[from_index]);
+    tabs_.erase(tabs_.begin() + from_index);
+    tabs_.insert(tabs_.begin() + to_index, std::move(moved_tab));
+
+    if (active_tab_id != 0) {
+        for (int i = 0; i < static_cast<int>(tabs_.size()); ++i) {
+            if (tabs_[i].id == active_tab_id) {
+                active_index_ = i;
+                return true;
+            }
+        }
+    }
+
+    active_index_ = std::clamp(active_index_, 0, static_cast<int>(tabs_.size()) - 1);
+    return true;
+}
+
 bool TabManager::NavigateTo(const std::wstring& path) {
     if (!IsValidIndex(active_index_)) {
         return false;
@@ -382,6 +405,44 @@ bool TabManager::CanNavigateUp() const {
         return false;
     }
     return !ParentPath(tabs_[active_index_].path).empty();
+}
+
+std::vector<TabManager::SessionTab> TabManager::CaptureSession() const {
+    std::vector<SessionTab> session_tabs;
+    session_tabs.reserve(tabs_.size());
+    for (const TabState& tab : tabs_) {
+        session_tabs.push_back({tab.path, tab.pinned});
+    }
+    return session_tabs;
+}
+
+bool TabManager::RestoreSession(const std::vector<SessionTab>& tabs, int active_index) {
+    std::vector<TabState> restored_tabs;
+    restored_tabs.reserve(tabs.size());
+
+    for (const SessionTab& tab : tabs) {
+        const std::wstring normalized_path = NormalizePath(tab.path);
+        if (normalized_path.empty()) {
+            continue;
+        }
+
+        TabState state = {};
+        state.id = next_tab_id_++;
+        state.path = normalized_path;
+        state.displayName = BuildDisplayName(normalized_path);
+        state.pinned = tab.pinned;
+        state.history = {normalized_path};
+        state.historyIndex = 0;
+        restored_tabs.push_back(std::move(state));
+    }
+
+    if (restored_tabs.empty()) {
+        return false;
+    }
+
+    tabs_ = std::move(restored_tabs);
+    active_index_ = (std::max)(0, (std::min)(active_index, static_cast<int>(tabs_.size()) - 1));
+    return true;
 }
 
 std::wstring TabManager::DefaultTabPath() {

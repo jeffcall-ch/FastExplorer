@@ -11,8 +11,15 @@ public:
     using FileListColumnWidthsLogical = std::array<int, kFileListColumnCount>;
 
     struct Values {
+        bool show_hidden_files = false;
+        bool show_extensions = true;
+        std::wstring theme = L"dark";
         int sidebar_width_logical = 320;
         FileListColumnWidthsLogical file_list_column_widths_logical{{260, 60, 140, 90, 320}};
+        int window_left = 100;
+        int window_top = 80;
+        int window_width = 1200;
+        int window_height = 750;
     };
 
     Settings();

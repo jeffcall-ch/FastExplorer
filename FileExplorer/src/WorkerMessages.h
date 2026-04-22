@@ -25,5 +25,6 @@
 namespace fileexplorer {
 
 constexpr UINT WM_FE_ACTIVE_FOLDER_DIRTY = WM_APP + 5;
+constexpr UINT WM_FE_IPC_OPEN_PATH = WM_APP + 6;
 
 }  // namespace fileexplorer

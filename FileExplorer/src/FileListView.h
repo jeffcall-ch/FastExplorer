@@ -24,6 +24,9 @@ constexpr UINT WM_FE_FILELIST_REFRESH = WM_APP + 105;
 constexpr UINT WM_FE_FILELIST_OPEN_LOCATION_NEW_TAB = WM_APP + 109;
 constexpr UINT WM_FE_FILELIST_ADD_REGULAR_FAVOURITE = WM_APP + 110;
 constexpr UINT WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE = WM_APP + 111;
+constexpr UINT WM_FE_FILELIST_SORT_CHANGED = WM_APP + 112;
+constexpr UINT WM_FE_FILELIST_TOGGLE_SHOW_HIDDEN = WM_APP + 113;
+constexpr UINT WM_FE_FILELIST_TOGGLE_SHOW_EXTENSIONS = WM_APP + 114;
 
 enum class SortColumn {
     Name = 0,
@@ -57,6 +60,12 @@ public:
     static constexpr int kColumnCount = 5;
     using ColumnWidthsLogical = std::array<int, kColumnCount>;
 
+    struct ViewStateSnapshot {
+        std::vector<std::wstring> selected_names;
+        std::wstring focused_name;
+        int top_index = 0;
+    };
+
     struct SearchSnapshot {
         std::wstring root_path;
         std::wstring pattern;
@@ -87,9 +96,19 @@ public:
     bool IsSearchMode() const noexcept;
     bool CaptureSearchSnapshot(SearchSnapshot* snapshot) const;
     bool RestoreSearchSnapshot(const SearchSnapshot& snapshot);
+    bool CaptureViewStateSnapshot(ViewStateSnapshot* snapshot) const;
+    void SetPendingViewStateSnapshot(const ViewStateSnapshot* snapshot);
+    void ClearPendingViewStateSnapshot();
 
     bool LoadFolder(const std::wstring& path);
     const std::wstring& current_path() const noexcept;
+    void SetShowHiddenFiles(bool show_hidden_files);
+    bool show_hidden_files() const noexcept;
+    void SetShowExtensions(bool show_extensions);
+    bool show_extensions() const noexcept;
+    void SetSortOrder(SortColumn sort_column, SortDirection sort_direction);
+    SortColumn sort_column() const noexcept;
+    SortDirection sort_direction() const noexcept;
     void SetColumnWidthsLogical(const ColumnWidthsLogical& widths);
     ColumnWidthsLogical GetColumnWidthsLogical() const;
     static ColumnWidthsLogical DefaultColumnWidthsLogical();
@@ -196,6 +215,7 @@ private:
     void SetCutPendingPaths(const std::vector<std::wstring>& paths);
     void RemoveCutPendingPaths(const std::vector<std::wstring>& paths);
     bool IsPathCutPending(const std::wstring& full_path) const;
+    std::wstring BuildDisplayName(const FileEntry& entry) const;
 
     std::wstring BuildFullPath(const FileEntry& entry) const;
     static std::wstring NormalizePath(std::wstring path);
@@ -246,6 +266,10 @@ private:
     std::wstring search_root_path_{};
     std::wstring search_pattern_{};
     ULONGLONG search_elapsed_ms_{0};
+    bool has_pending_view_state_snapshot_{false};
+    ViewStateSnapshot pending_view_state_snapshot_{};
+    bool show_hidden_files_{false};
+    bool show_extensions_{true};
 
     HWND rename_edit_hwnd_{nullptr};
     int rename_item_index_{-1};
