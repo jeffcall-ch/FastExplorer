@@ -1,4 +1,5 @@
 ﻿#include "resource.h"
 #include <winres.h>
 
+IDI_APP_ICON ICON "res\\FileExplorer.ico"
 CREATEPROCESS_MANIFEST_RESOURCE_ID RT_MANIFEST "res\\FileExplorer.exe.manifest"

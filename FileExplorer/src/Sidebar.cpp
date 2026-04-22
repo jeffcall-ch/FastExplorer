@@ -47,6 +47,12 @@ void LogLastError(const wchar_t* context) {
     OutputDebugStringW(buffer);
 }
 
+void LogHResult(const wchar_t* context, HRESULT hr) {
+    wchar_t buffer[256] = {};
+    swprintf_s(buffer, L"[FileExplorer] %s failed (HRESULT=0x%08lX).\r\n", context, static_cast<unsigned long>(hr));
+    OutputDebugStringW(buffer);
+}
+
 int ScaleForDpi(int value, UINT dpi) {
     return MulDiv(value, static_cast<int>(dpi), 96);
 }
@@ -164,6 +170,11 @@ bool Sidebar::Create(HWND parent, HINSTANCE instance, int control_id) {
     if (hwnd_ == nullptr) {
         LogLastError(L"CreateWindowExW(FE_Sidebar)");
         return false;
+    }
+
+    const HRESULT theme_hr = SetWindowTheme(hwnd_, L"DarkMode_Explorer", nullptr);
+    if (FAILED(theme_hr)) {
+        LogHResult(L"SetWindowTheme(FE_Sidebar)", theme_hr);
     }
 
     BuildDefaultItems();

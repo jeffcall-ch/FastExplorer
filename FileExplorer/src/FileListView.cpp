@@ -23,13 +23,13 @@ namespace {
 constexpr UINT_PTR kListViewSubclassId = 1;
 constexpr UINT_PTR kLoadingTimerId = 9001;
 
-constexpr COLORREF kListBackgroundColor = RGB(0x18, 0x1C, 0x22);
+constexpr COLORREF kListBackgroundColor = fileexplorer::colors::kBgFileList;
 constexpr COLORREF kListTextColor = RGB(0xE2, 0xE8, 0xEF);
 constexpr COLORREF kListCutPendingTextColor = RGB(0x93, 0x9C, 0xAA);
-constexpr COLORREF kHeaderBackgroundColor = RGB(0x1F, 0x25, 0x2D);
-constexpr COLORREF kHeaderHoverBackgroundColor = RGB(0x24, 0x2B, 0x35);
+constexpr COLORREF kHeaderBackgroundColor = kListBackgroundColor;
+constexpr COLORREF kHeaderHoverBackgroundColor = RGB(0x1C, 0x22, 0x2A);
 constexpr COLORREF kHeaderTextColor = RGB(0xD2, 0xDA, 0xE4);
-constexpr COLORREF kHeaderDividerColor = RGB(0x33, 0x3B, 0x47);
+constexpr COLORREF kHeaderDividerColor = fileexplorer::colors::kSeparatorSubtle;
 constexpr COLORREF kHeaderSortGlyphColor = RGB(0xA9, 0xB4, 0xC2);
 constexpr COLORREF kDividerBackgroundColor = RGB(0x1E, 0x24, 0x2B);
 constexpr COLORREF kDividerTextColor = RGB(0xAC, 0xB6, 0xC2);
@@ -55,6 +55,7 @@ constexpr UINT kMenuNewFolder = 7011;
 constexpr UINT kMenuToggleShowHidden = 7012;
 constexpr UINT kMenuToggleShowExtensions = 7013;
 constexpr UINT_PTR kRenameEditSubclassId = 2;
+constexpr UINT_PTR kHeaderEraseSubclassId = 3;
 constexpr UINT kShellMenuCommandFirst = 7400;
 constexpr UINT kShellMenuCommandLast = 7599;
 constexpr DWORD kTypeAheadResetMs = 1200;
@@ -254,6 +255,10 @@ FileListView::FileListView() = default;
 FileListView::~FileListView() {
     EndInlineRenameControl();
     ClearShellContextMenu();
+    if (header_hwnd_ != nullptr) {
+        RemoveWindowSubclass(header_hwnd_, &FileListView::HeaderEraseSubclassProc, kHeaderEraseSubclassId);
+        header_hwnd_ = nullptr;
+    }
     if (hwnd_ != nullptr) {
         RemoveWindowSubclass(hwnd_, &FileListView::ListViewSubclassProc, kListViewSubclassId);
     }
@@ -784,6 +789,51 @@ LRESULT CALLBACK FileListView::RenameEditSubclassProc(
     return DefSubclassProc(hwnd, message, w_param, l_param);
 }
 
+LRESULT CALLBACK FileListView::HeaderEraseSubclassProc(
+    HWND hwnd,
+    UINT message,
+    WPARAM w_param,
+    LPARAM l_param,
+    UINT_PTR subclass_id,
+    DWORD_PTR ref_data) {
+    (void)subclass_id;
+    (void)l_param;
+
+    auto* self = reinterpret_cast<FileListView*>(ref_data);
+    if (self == nullptr) {
+        return DefSubclassProc(hwnd, message, w_param, l_param);
+    }
+
+    switch (message) {
+    case WM_ERASEBKGND: {
+        HDC hdc = reinterpret_cast<HDC>(w_param);
+        if (hdc != nullptr) {
+            RECT rect = {};
+            if (GetClientRect(hwnd, &rect)) {
+                HBRUSH brush = CreateSolidBrush(kHeaderBackgroundColor);
+                if (brush != nullptr) {
+                    FillRect(hdc, &rect, brush);
+                    DeleteObject(brush);
+                }
+            }
+        }
+        return 1;
+    }
+
+    case WM_NCDESTROY:
+        RemoveWindowSubclass(hwnd, &FileListView::HeaderEraseSubclassProc, kHeaderEraseSubclassId);
+        if (self->header_hwnd_ == hwnd) {
+            self->header_hwnd_ = nullptr;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    return DefSubclassProc(hwnd, message, w_param, l_param);
+}
+
 bool FileListView::CreateListViewControl() {
     constexpr DWORD style =
         WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS;
@@ -809,6 +859,11 @@ bool FileListView::CreateListViewControl() {
     if (!SetWindowSubclass(hwnd_, &FileListView::ListViewSubclassProc, kListViewSubclassId, reinterpret_cast<DWORD_PTR>(this))) {
         LogLastError(L"SetWindowSubclass(FileListView)");
         return false;
+    }
+
+    const HRESULT list_theme_result = SetWindowTheme(hwnd_, L"DarkMode_Explorer", nullptr);
+    if (FAILED(list_theme_result)) {
+        LogHResult(L"SetWindowTheme(FileListView)", list_theme_result);
     }
 
     const DWORD ex_style = LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER | LVS_EX_HEADERDRAGDROP;
@@ -882,9 +937,25 @@ void FileListView::ApplyHeaderVisualStyle() {
         return;
     }
 
+    if (header_hwnd_ != nullptr && header_hwnd_ != header) {
+        RemoveWindowSubclass(header_hwnd_, &FileListView::HeaderEraseSubclassProc, kHeaderEraseSubclassId);
+        header_hwnd_ = nullptr;
+    }
+    header_hwnd_ = header;
+
+    // Keep header visual styles disabled so our custom-draw path controls the full
+    // dark surface and text colors consistently.
     const HRESULT theme_result = SetWindowTheme(header, L"", L"");
     if (FAILED(theme_result)) {
         LogHResult(L"SetWindowTheme(ListHeader)", theme_result);
+    }
+
+    if (!SetWindowSubclass(
+            header,
+            &FileListView::HeaderEraseSubclassProc,
+            kHeaderEraseSubclassId,
+            reinterpret_cast<DWORD_PTR>(this))) {
+        LogLastError(L"SetWindowSubclass(ListHeaderErase)");
     }
 
     InvalidateRect(header, nullptr, TRUE);
@@ -1108,20 +1179,31 @@ bool FileListView::HandleHeaderCustomDraw(NMCUSTOMDRAW* custom_draw, LRESULT* re
         return false;
     }
 
-    switch (custom_draw->dwDrawStage) {
-    case CDDS_PREPAINT:
-        *result = CDRF_NOTIFYITEMDRAW;
-        return true;
+    const DWORD draw_stage = custom_draw->dwDrawStage;
 
-    case CDDS_ITEMPREPAINT: {
+    if (draw_stage == CDDS_PREPAINT) {
+        RECT header_rect = {};
+        if (GetClientRect(header, &header_rect)) {
+            HBRUSH header_brush = CreateSolidBrush(kHeaderBackgroundColor);
+            if (header_brush != nullptr) {
+                FillRect(custom_draw->hdc, &header_rect, header_brush);
+                DeleteObject(header_brush);
+            }
+        }
+
+        *result = CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT;
+        return true;
+    }
+
+    if ((draw_stage & CDDS_ITEMPREPAINT) == CDDS_ITEMPREPAINT) {
         const int column_index = static_cast<int>(custom_draw->dwItemSpec);
         RECT rect = custom_draw->rc;
         const bool hot = (custom_draw->uItemState & CDIS_HOT) != 0;
 
-        HBRUSH header_brush = CreateSolidBrush(hot ? kHeaderHoverBackgroundColor : kHeaderBackgroundColor);
-        if (header_brush != nullptr) {
-            FillRect(custom_draw->hdc, &rect, header_brush);
-            DeleteObject(header_brush);
+        HBRUSH column_brush = CreateSolidBrush(hot ? kHeaderHoverBackgroundColor : kHeaderBackgroundColor);
+        if (column_brush != nullptr) {
+            FillRect(custom_draw->hdc, &rect, column_brush);
+            DeleteObject(column_brush);
         }
 
         wchar_t text_buffer[128] = {};
@@ -1200,8 +1282,43 @@ bool FileListView::HandleHeaderCustomDraw(NMCUSTOMDRAW* custom_draw, LRESULT* re
         return true;
     }
 
-    default:
-        break;
+    if (draw_stage == CDDS_POSTPAINT) {
+        RECT header_rect = {};
+        if (!GetClientRect(header, &header_rect)) {
+            *result = CDRF_DODEFAULT;
+            return true;
+        }
+
+        int right_edge = 0;
+        const int column_count = Header_GetItemCount(header);
+        for (int column = 0; column < column_count; ++column) {
+            RECT column_rect = {};
+            if (Header_GetItemRect(header, column, &column_rect)) {
+                right_edge = (std::max)(right_edge, static_cast<int>(column_rect.right));
+            }
+        }
+
+        if (right_edge < header_rect.right) {
+            RECT trailing_rect = header_rect;
+            trailing_rect.left = right_edge;
+            HBRUSH trailing_brush = CreateSolidBrush(kHeaderBackgroundColor);
+            if (trailing_brush != nullptr) {
+                FillRect(custom_draw->hdc, &trailing_rect, trailing_brush);
+                DeleteObject(trailing_brush);
+            }
+        }
+
+        HPEN divider_pen = CreatePen(PS_SOLID, 1, kHeaderDividerColor);
+        if (divider_pen != nullptr) {
+            HGDIOBJ old_pen = SelectObject(custom_draw->hdc, divider_pen);
+            MoveToEx(custom_draw->hdc, header_rect.left, header_rect.bottom - 1, nullptr);
+            LineTo(custom_draw->hdc, header_rect.right, header_rect.bottom - 1);
+            SelectObject(custom_draw->hdc, old_pen);
+            DeleteObject(divider_pen);
+        }
+
+        *result = CDRF_DODEFAULT;
+        return true;
     }
 
     return false;
@@ -1275,6 +1392,28 @@ bool FileListView::HandleClick(const NMITEMACTIVATE* item_activate) {
 
 LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM l_param) {
     switch (message) {
+    case WM_NOTIFY: {
+        auto* notify = reinterpret_cast<NMHDR*>(l_param);
+        if (notify != nullptr) {
+            HWND header = (hwnd_ != nullptr) ? ListView_GetHeader(hwnd_) : nullptr;
+            if (header != nullptr && notify->hwndFrom == header) {
+                if (notify->code == NM_CUSTOMDRAW) {
+                    LRESULT header_result = 0;
+                    if (HandleHeaderCustomDraw(reinterpret_cast<NMCUSTOMDRAW*>(l_param), &header_result)) {
+                        return header_result;
+                    }
+                }
+                if (notify->code == HDN_ENDTRACKA ||
+                    notify->code == HDN_ENDTRACKW ||
+                    notify->code == HDN_ITEMCHANGEDA ||
+                    notify->code == HDN_ITEMCHANGEDW) {
+                    CaptureCurrentColumnWidths();
+                }
+            }
+        }
+        break;
+    }
+
     case WM_KEYDOWN: {
         const bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
         const bool shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -1324,6 +1463,15 @@ LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM
 
         if (w_param == VK_F2) {
             BeginInlineRename(ResolveContextTargetIndex(-1));
+            return 0;
+        }
+
+        if (w_param == VK_ESCAPE && !ctrl_down && !shift_down && !alt_down) {
+            ClearSelection();
+            if (hwnd_ != nullptr) {
+                SetFocus(hwnd_);
+            }
+            PostStatusUpdate();
             return 0;
         }
 

@@ -26,7 +26,7 @@ Last updated:      2026-04-22 by assistant
 Current phase:     Phase 15 - Portable Release Build
 Current target:    CP-15 (not started - waiting for user instruction)
 Last checkpoint:   CP-14 - PASS
-Build status:      PASS - Debug x64 app/tests available; manual integration checklist confirmed
+Build status:      PASS - Debug x64 app rebuilt after header-tail dark-theme fix
 Tests status:      PASS - FileExplorer.Tests.exe runs and passes (56 tests, 0 failures)
 Blockers:          None
 ```
@@ -508,11 +508,138 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** Keep CP-14 open pending duplicate assistant-led rerun (rejected: would duplicate completed manual validation without adding new signal).  
 **Status:** Closed
 
+### AD-073 - 2026-04-22 - Dark Header/Scrollbar Visual Alignment + Dedicated App Icon Resource
+**Decision:** Align list header background to the same dark surface family as the details pane, explicitly theme list/sidebar scrollbars with `DarkMode_Explorer`, and embed/register a dedicated multi-size app icon resource for class/taskbar identity.  
+**Rationale:** User requested stronger dark-theme consistency for header/scrollbars and a non-default icon that remains consistent when pinned to taskbar.  
+**Alternatives considered:** Keep existing custom-draw colors and rely on default control theming/icon fallback (rejected: still showed light/legacy visual artifacts and default icon behavior).  
+**Status:** Closed
+
+### AD-074 - 2026-04-22 - Header Chrome De-Legacy + Esc Clears Selection
+**Decision:** Strip button-style header chrome (`HDS_BUTTONS` removal + `HDS_FLAT`), remove client-edge framing, keep dark header theme + custom paint path, and bind `Esc` in file-list key handling to clear selection while keeping list focus.  
+**Rationale:** User reported remaining bright header frames/text background artifacts and requested `Esc` selection-cancel behavior with immediate arrow-navigation continuity.  
+**Alternatives considered:** Increase color overrides only (rejected: does not remove legacy frame chrome).  
+**Status:** Closed
+
+### AD-075 - 2026-04-22 - Route Header NM_CUSTOMDRAW Through ListView Notify Path
+**Decision:** Handle header `NM_CUSTOMDRAW` in the list-view control's own notify stream (`FileListView` subclass `WM_NOTIFY`) and keep `CDRF_SKIPDEFAULT` full-row header rendering in that path.  
+**Rationale:** Header visuals remained light because the effective notification path for `SysHeader32` custom draw in this composition was not consistently handled by the prior parent-window route.  
+**Alternatives considered:** Full header owner-draw/subclass repaint loop (rejected due prior CPU/rendering instability), continue color-only adjustments in parent notify handler (rejected as ineffective in this setup).  
+**Status:** Closed
+
+### AD-076 - 2026-04-22 - Header Tail Region Postpaint Fill (Right of Last Column)
+**Decision:** Keep the stage-correct header custom-draw contract (`CDDS_PREPAINT -> CDRF_NOTIFYITEMDRAW | CDRF_NOTIFYPOSTPAINT`, `CDDS_ITEMPREPAINT -> CDRF_SKIPDEFAULT`) and add a `CDDS_POSTPAINT` pass that repaints the trailing header region (right of the last visible column) with the dark header background plus subtle bottom divider.  
+**Rationale:** After the primary header fix, user still observed one remaining light/legacy-framed area next to the `Size` column; that area is outside item-prepaint coverage and needed an explicit tail paint pass.  
+**Alternatives considered:** Force column-width/layout changes to hide the tail (rejected: behavior/layout side effects), full header `WM_PAINT` ownership (rejected: previously unstable/high-risk path), additional theme flags only (rejected: not sufficient for this artifact).  
+**Status:** Closed
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 071 - 2026-04-22
+**Phase:** Phase 15 - Portable Release Build (header-tail visual completion)  
+**Goal for this session:** Remove the last legacy light-framed header strip to the right of `Size` while preserving sort/click behavior and app stability.  
+**Completed:**  
+- Re-read AGENTS/journal/plan context and validated current `FileListView` header rendering path.  
+- Kept stage-correct `NM_CUSTOMDRAW` handling and hardened item-stage matching to prevent fallback default header paint in flagged draw stages.  
+- Added `CDDS_POSTPAINT` tail-region repaint in `HandleHeaderCustomDraw(...)`:
+  - fills header area right of the last visible column with dark header background
+  - redraws subtle bottom divider for continuity.  
+- Built `FileExplorer.vcxproj` successfully (`Debug x64`, 0 errors, 0 warnings).  
+- Ran tests: `x64\\Debug\\FileExplorer.Tests.exe` -> 56 passed, 0 failed.  
+- Launched updated app build; user confirmed: "works".  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-076  
+**Errors encountered and resolved:**  
+- Initial rebuild failed with `LNK1168` (running `FileExplorer.exe` locked target); resolved by stopping process and rebuilding.  
+- Compile error from mixed `LONG`/`int` in `(std::max)` call; resolved with explicit cast for `RECT::right`.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Not started  
+**Next session should start with:**  
+- Continue Phase 15 tasks per user direction; keep header custom-draw contract and postpaint tail fill intact during any further visual adjustments.
+
+### Session 070 - 2026-04-22
+**Phase:** Phase 15 - Portable Release Build (header-rendering correction)  
+**Goal for this session:** Fix persistent light/legacy column-header rendering with a stable, click-safe path; verify with build/tests.  
+**Completed:**  
+- Confirmed problem statement from user screenshot: header remained legacy-bright while list body/sidebar were dark.  
+- Reviewed official Microsoft header-control/custom-draw docs and applied implementation based on those mechanics.  
+- Implemented routing of header `NM_CUSTOMDRAW` through `FileListView::HandleSubclassMessage(WM_NOTIFY)` for `ListView_GetHeader(hwnd_)` notifications.  
+- Kept dark full-row header rendering with `CDRF_SKIPDEFAULT` in `HandleHeaderCustomDraw(...)`.  
+- Built `FileExplorer.vcxproj` successfully (`Debug x64`, 0 errors, 0 warnings).  
+- Ran tests successfully: `FileExplorer.Tests.exe` -> 56 passed, 0 failed.  
+- Launched updated app build for user verification.  
+**Not completed / carried forward:**  
+- User visual confirmation pending on final header appearance.  
+**Decisions made:** AD-075  
+**Errors encountered and resolved:**  
+- Prior experimental header-subclass repaint route caused instability and was removed before this stable fix.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Not started  
+**Next session should start with:**  
+- User confirms header dark rendering and sort-click behavior on updated build.
+
+### Session 069 - 2026-04-22
+**Phase:** Phase 15 - Portable Release Build (targeted UX polish)  
+**Goal for this session:** Remove remaining bright column-header chrome and add `Esc` clear-selection behavior in details pane.  
+**Completed:**  
+- Updated list-header visual style application in `FileListView`:
+  - removed button-like header framing style
+  - forced flat header style
+  - removed client-edge effect
+  - refreshed header frame and kept dark theme hook active.  
+- Kept custom header paint dark and added explicit header text background color binding for consistency.  
+- Added `Esc` handling in file-list key path:
+  - clears all selected rows
+  - keeps focus in details pane
+  - status text updates immediately.  
+- Built app successfully (`FileExplorer.vcxproj`, Debug x64).  
+- Ran unit tests successfully (`56/56` pass).  
+- Launched updated app for user verification.  
+**Not completed / carried forward:**  
+- User validation pending for final header appearance acceptance.  
+**Decisions made:** AD-074  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Not started  
+**Next session should start with:**  
+- User confirms header rendering and `Esc` behavior; continue Phase 15 scope.
+
+### Session 068 - 2026-04-22
+**Phase:** Phase 15 - Portable Release Build (pre-checkpoint visual refinement)  
+**Goal for this session:** Apply user-requested visual dark-theme/header/scrollbar improvements and add a dedicated app icon resource.  
+**Completed:**  
+- Updated list-header rendering in `FileListView`:
+  - header base now paints fully on prepaint
+  - non-hover header surface aligned to list dark surface
+  - divider tone softened to shared separator color family.  
+- Applied `SetWindowTheme(..., L\"DarkMode_Explorer\", ...)` to:
+  - main list view control (vertical/horizontal scrollbar dark styling path)
+  - sidebar host (vertical scrollbar dark styling path).  
+- Added app icon resource pipeline:
+  - new `FileExplorer/res/FileExplorer.ico` (multi-size icon)
+  - `resource.h` icon id
+  - `resource.rc` icon binding
+  - `MainWindow` class icon + small icon load from resource.  
+- Rebuilt `FileExplorer.vcxproj` (Debug x64) successfully (0 errors, 0 warnings).  
+- Launched updated app for visual verification.  
+**Not completed / carried forward:**  
+- User visual confirmation pending for this refinement.  
+**Decisions made:** AD-073  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Not started  
+**Next session should start with:**  
+- User confirms header/scrollbar/icon visuals; then continue Phase 15 checklist.
 
 ### Session 067 - 2026-04-22
 **Phase:** Phase 14 - Integration & Manual Tests (completion)  
@@ -2213,6 +2340,46 @@ Severity: Blocker | High | Low | Debt
 ---
 
 ## Test Results Log
+
+### Test Run 060 - 2026-04-22
+**Configuration:** Debug x64  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-header-tail `CDDS_POSTPAINT` dark-fill fix verification run)  
+**Failures:**  
+- None
+
+### Test Run 059 - 2026-04-22
+**Configuration:** Debug x64  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-header NM_CUSTOMDRAW routing correction run)  
+**Failures:**  
+- None
+
+### Test Run 058 - 2026-04-22
+**Configuration:** Debug x64  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-header-chrome flattening + Esc clear-selection refinement run)  
+**Failures:**  
+- None
+
+### Test Run 057 - 2026-04-22
+**Configuration:** Debug x64  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-dark-header/scrollbar theme + icon resource refinement run)  
+**Failures:**  
+- None
 
 ### Test Run 056 - 2026-04-22
 **Configuration:** Debug x64  

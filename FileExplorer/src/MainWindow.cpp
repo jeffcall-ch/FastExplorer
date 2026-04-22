@@ -12,6 +12,7 @@
 #include "Colors.h"
 #include "WorkerMessages.h"
 #include "SearchWorker.h"
+#include "resource.h"
 
 namespace {
 
@@ -282,6 +283,16 @@ bool MainWindow::RegisterWindowClass() {
     window_class.hCursor = LoadCursorW(nullptr, IDC_ARROW);
     if (window_class.hCursor == nullptr) {
         LogLastError(L"LoadCursorW");
+    }
+    window_class.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
+    if (window_class.hIcon == nullptr) {
+        LogLastError(L"LoadIconW(MainWindow Big)");
+        window_class.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    }
+    window_class.hIconSm = LoadIconW(instance_, MAKEINTRESOURCEW(IDI_APP_ICON));
+    if (window_class.hIconSm == nullptr) {
+        LogLastError(L"LoadIconW(MainWindow Small)");
+        window_class.hIconSm = LoadIconW(nullptr, IDI_APPLICATION);
     }
     window_class.hbrBackground = nullptr;
     window_class.lpszClassName = kMainWindowClassName;

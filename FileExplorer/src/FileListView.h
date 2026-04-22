@@ -144,6 +144,13 @@ private:
         LPARAM l_param,
         UINT_PTR subclass_id,
         DWORD_PTR ref_data);
+    static LRESULT CALLBACK HeaderEraseSubclassProc(
+        HWND hwnd,
+        UINT message,
+        WPARAM w_param,
+        LPARAM l_param,
+        UINT_PTR subclass_id,
+        DWORD_PTR ref_data);
 
     bool CreateListViewControl();
     void CreateColumns();
@@ -235,6 +242,7 @@ private:
 
     HWND parent_hwnd_{nullptr};
     HWND hwnd_{nullptr};
+    HWND header_hwnd_{nullptr};
     HINSTANCE instance_{nullptr};
     int control_id_{0};
     UINT dpi_{96U};
