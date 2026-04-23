@@ -143,7 +143,8 @@ void SortEntries(
         entries->begin(),
         entries->end(),
         [column, direction](const SortEntry& left, const SortEntry& right) {
-            if (left.is_folder != right.is_folder) {
+            const bool enforce_folders_first = column != LocalSortColumn::DateModified;
+            if (enforce_folders_first && left.is_folder != right.is_folder) {
                 return left.is_folder && !right.is_folder;
             }
 
@@ -259,6 +260,21 @@ TEST(Sort, FolderAlwaysFirst) {
     SortEntries(&entries, LocalSortColumn::Name, LocalSortDirection::Descending);
     EXPECT_TRUE(entries[0].is_folder);
     EXPECT_TRUE(entries[0].name == L"A_Folder");
+}
+
+TEST(Sort, DateModifiedTreatsFoldersLikeFiles) {
+    std::vector<SortEntry> entries = {
+        {L"folder_old", L"", FileTimeDaysAgo(10), 0, true},
+        {L"file_new.txt", L".txt", FileTimeDaysAgo(0), 100, false},
+        {L"folder_mid", L"", FileTimeDaysAgo(3), 0, true},
+        {L"file_older.txt", L".txt", FileTimeDaysAgo(7), 50, false},
+    };
+
+    SortEntries(&entries, LocalSortColumn::DateModified, LocalSortDirection::Descending);
+    EXPECT_TRUE(entries[0].name == L"file_new.txt");
+    EXPECT_TRUE(entries[1].name == L"folder_mid");
+    EXPECT_TRUE(entries[2].name == L"file_older.txt");
+    EXPECT_TRUE(entries[3].name == L"folder_old");
 }
 
 TEST(Sort, DateGroupBuckets) {

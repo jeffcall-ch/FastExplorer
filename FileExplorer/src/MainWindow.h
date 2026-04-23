@@ -73,6 +73,7 @@ private:
     void LoadSessionState();
     void SaveSessionState() const;
     void SaveLayoutSettings() const;
+    void EnsureWindowPlacementVisible();
     bool ApplySidebarWidthFromPointerX(int pointer_x);
     int EffectiveSidebarWidthPx(int client_width) const;
     int ClampSidebarWidthPx(int requested_sidebar_width_px, int client_width) const;
@@ -143,6 +144,7 @@ private:
     std::wstring watched_folder_path_{};
     bool pending_debounced_refresh_{false};
     uint64_t pending_debounced_refresh_generation_{0};
+    ULONGLONG last_auto_folder_refresh_tick_ms_{0};
     std::wstring pending_post_load_selection_name_{};
 
     UniqueBrush nav_brush_{nullptr};

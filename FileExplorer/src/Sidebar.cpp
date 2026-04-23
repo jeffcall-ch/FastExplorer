@@ -2,6 +2,7 @@
 
 #include <CommCtrl.h>
 #include <Shellapi.h>
+#include <Shobjidl.h>
 #include <Windowsx.h>
 #include <strsafe.h>
 #include <uxtheme.h>
@@ -55,6 +56,81 @@ void LogHResult(const wchar_t* context, HRESULT hr) {
 
 int ScaleForDpi(int value, UINT dpi) {
     return MulDiv(value, static_cast<int>(dpi), 96);
+}
+
+bool EndsWithInsensitive(const std::wstring& text, const wchar_t* suffix) {
+    if (suffix == nullptr) {
+        return false;
+    }
+
+    const size_t suffix_length = wcslen(suffix);
+    if (suffix_length == 0 || text.size() < suffix_length) {
+        return false;
+    }
+
+    const wchar_t* tail = text.c_str() + (text.size() - suffix_length);
+    const int compare = CompareStringOrdinal(
+        tail,
+        static_cast<int>(suffix_length),
+        suffix,
+        static_cast<int>(suffix_length),
+        TRUE);
+    return compare == CSTR_EQUAL;
+}
+
+bool TryResolveShortcutTarget(
+    const std::wstring& shortcut_path,
+    std::wstring* target_path,
+    bool* target_is_folder) {
+    if (target_path == nullptr || target_is_folder == nullptr) {
+        return false;
+    }
+    if (!EndsWithInsensitive(shortcut_path, L".lnk")) {
+        return false;
+    }
+
+    IShellLinkW* shell_link = nullptr;
+    HRESULT hr = CoCreateInstance(
+        CLSID_ShellLink,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&shell_link));
+    if (FAILED(hr) || shell_link == nullptr) {
+        return false;
+    }
+
+    IPersistFile* persist_file = nullptr;
+    hr = shell_link->QueryInterface(IID_PPV_ARGS(&persist_file));
+    if (FAILED(hr) || persist_file == nullptr) {
+        shell_link->Release();
+        return false;
+    }
+
+    hr = persist_file->Load(shortcut_path.c_str(), STGM_READ);
+    if (SUCCEEDED(hr)) {
+        (void)shell_link->Resolve(nullptr, SLR_NO_UI | SLR_NOUPDATE | SLR_NOTRACK);
+
+        WIN32_FIND_DATAW find_data = {};
+        wchar_t resolved_path[MAX_PATH] = {};
+        hr = shell_link->GetPath(resolved_path, static_cast<int>(std::size(resolved_path)), &find_data, SLGP_RAWPATH);
+        if (SUCCEEDED(hr) && resolved_path[0] != L'\0') {
+            *target_path = resolved_path;
+            DWORD attributes = find_data.dwFileAttributes;
+            if (attributes == 0 || attributes == INVALID_FILE_ATTRIBUTES) {
+                attributes = GetFileAttributesW(resolved_path);
+            }
+            *target_is_folder =
+                attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            persist_file->Release();
+            shell_link->Release();
+            return true;
+        }
+    }
+
+    persist_file->Release();
+    shell_link->Release();
+    return false;
 }
 
 std::wstring TrimWhitespace(std::wstring text) {
@@ -497,6 +573,14 @@ LRESULT Sidebar::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
         }
 
         const bool left_down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+        if (flyout_ignore_initial_mouse_release_) {
+            flyout_menu_left_button_was_down_ = left_down;
+            if (!left_down) {
+                flyout_ignore_initial_mouse_release_ = false;
+            }
+            return 0;
+        }
+
         const bool left_down_edge = left_down && !flyout_menu_left_button_was_down_;
         flyout_menu_left_button_was_down_ = left_down;
 
@@ -1545,8 +1629,18 @@ void Sidebar::OpenPathOrNavigate(const std::wstring& path, bool is_folder) const
         return;
     }
 
+    std::wstring launch_target = normalized;
+    bool launch_target_is_folder = false;
+    if (TryResolveShortcutTarget(normalized, &launch_target, &launch_target_is_folder)) {
+        launch_target = NormalizePath(std::move(launch_target));
+        if (launch_target_is_folder) {
+            PostNavigatePath(launch_target);
+            return;
+        }
+    }
+
     const HINSTANCE open_result =
-        ShellExecuteW(hwnd_, L"open", normalized.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        ShellExecuteW(hwnd_, L"open", launch_target.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
     const INT_PTR shell_status = reinterpret_cast<INT_PTR>(open_result);
     if (shell_status <= 32) {
         wchar_t buffer[256] = {};
@@ -1554,7 +1648,7 @@ void Sidebar::OpenPathOrNavigate(const std::wstring& path, bool is_folder) const
             buffer,
             L"[FileExplorer] ShellExecuteW(Sidebar OpenPath) failed (status=%lld path=%s).\r\n",
             static_cast<long long>(shell_status),
-            normalized.c_str());
+            launch_target.c_str());
         OutputDebugStringW(buffer);
     }
 }
@@ -1593,6 +1687,12 @@ bool Sidebar::HandleFlyoutMenuHookMessage(const MSG& msg) {
     }
 
     if (msg.message != WM_LBUTTONUP) {
+        return false;
+    }
+
+    if (flyout_ignore_initial_mouse_release_) {
+        flyout_ignore_initial_mouse_release_ = false;
+        flyout_menu_left_button_was_down_ = false;
         return false;
     }
 
@@ -1673,6 +1773,7 @@ void Sidebar::ShowFlyoutPopup(const SidebarItem& item, POINT screen_point) {
 
     flyout_popup_active_ = true;
     flyout_menu_left_button_was_down_ = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0;
+    flyout_ignore_initial_mouse_release_ = flyout_menu_left_button_was_down_;
     InstallFlyoutMenuHook();
 
     POINT popup_point = screen_point;
@@ -1756,6 +1857,7 @@ void Sidebar::ClearFlyoutPopupState() {
     flyout_pending_selection_ = false;
     flyout_pending_target_ = {};
     flyout_menu_left_button_was_down_ = false;
+    flyout_ignore_initial_mouse_release_ = false;
 }
 
 UINT64 Sidebar::MakeFlyoutMenuPositionKey(HMENU menu, UINT item_position) {

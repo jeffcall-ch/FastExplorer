@@ -39,6 +39,7 @@ constexpr UINT kMenuViewShowExtensions = 40002;
 
 constexpr UINT_PTR kFolderRefreshDebounceTimerId = 9201;
 constexpr UINT kFolderRefreshDebounceMs = 500;
+constexpr ULONGLONG kAutoFolderRefreshMinIntervalMs = 1500;
 
 constexpr DWORD kDwmaUseImmersiveDarkMode = 20;
 constexpr DWORD kDwmaSystemBackdropType = 38;
@@ -55,6 +56,89 @@ void LogHResult(const wchar_t* context, HRESULT hr) {
     wchar_t buffer[256] = {};
     swprintf_s(buffer, L"[FileExplorer] %s failed (HRESULT=0x%08lX).\r\n", context, static_cast<unsigned long>(hr));
     OutputDebugStringW(buffer);
+}
+
+RECT BuildRectFromPositionSize(int left, int top, int width, int height) {
+    RECT rect = {};
+    rect.left = left;
+    rect.top = top;
+    rect.right = left + width;
+    rect.bottom = top + height;
+    return rect;
+}
+
+bool RectsEqual(const RECT& left, const RECT& right) {
+    return left.left == right.left &&
+        left.top == right.top &&
+        left.right == right.right &&
+        left.bottom == right.bottom;
+}
+
+RECT PrimaryWorkAreaRect() {
+    RECT work_area = {};
+    if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &work_area, 0)) {
+        LogLastError(L"SystemParametersInfoW(SPI_GETWORKAREA)");
+        work_area.left = 0;
+        work_area.top = 0;
+        work_area.right = GetSystemMetrics(SM_CXSCREEN);
+        work_area.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+    return work_area;
+}
+
+RECT WorkAreaForRect(const RECT& rect) {
+    RECT work_area = PrimaryWorkAreaRect();
+    HMONITOR monitor = MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST);
+    if (monitor == nullptr) {
+        return work_area;
+    }
+
+    MONITORINFO monitor_info = {};
+    monitor_info.cbSize = sizeof(monitor_info);
+    if (!GetMonitorInfoW(monitor, &monitor_info)) {
+        LogLastError(L"GetMonitorInfoW");
+        return work_area;
+    }
+    return monitor_info.rcWork;
+}
+
+RECT NormalizeWindowRectToVisibleArea(const RECT& rect) {
+    const RECT work_area = WorkAreaForRect(rect);
+    const int work_width = (std::max)(1, static_cast<int>(work_area.right - work_area.left));
+    const int work_height = (std::max)(1, static_cast<int>(work_area.bottom - work_area.top));
+
+    int width = static_cast<int>(rect.right - rect.left);
+    int height = static_cast<int>(rect.bottom - rect.top);
+    width = (std::max)(kWindowWidthMin, width);
+    height = (std::max)(kWindowHeightMin, height);
+    width = (std::min)(width, work_width);
+    height = (std::min)(height, work_height);
+
+    RECT adjusted = BuildRectFromPositionSize(rect.left, rect.top, width, height);
+    if (MonitorFromRect(&adjusted, MONITOR_DEFAULTTONULL) == nullptr) {
+        const int centered_left = work_area.left + ((work_width - width) / 2);
+        const int centered_top = work_area.top + ((work_height - height) / 2);
+        adjusted = BuildRectFromPositionSize(centered_left, centered_top, width, height);
+        return adjusted;
+    }
+
+    int clamped_left = adjusted.left;
+    int clamped_top = adjusted.top;
+    if (clamped_left < work_area.left) {
+        clamped_left = work_area.left;
+    }
+    if (clamped_left + width > work_area.right) {
+        clamped_left = work_area.right - width;
+    }
+    if (clamped_top < work_area.top) {
+        clamped_top = work_area.top;
+    }
+    if (clamped_top + height > work_area.bottom) {
+        clamped_top = work_area.bottom - height;
+    }
+
+    adjusted = BuildRectFromPositionSize(clamped_left, clamped_top, width, height);
+    return adjusted;
 }
 
 RECT CenteredWindowRect(DWORD window_style, DWORD window_ex_style) {
@@ -150,6 +234,20 @@ std::wstring LeafName(const std::wstring& path) {
 void BringWindowToForeground(HWND hwnd) {
     if (hwnd == nullptr) {
         return;
+    }
+
+    WINDOWPLACEMENT placement = {};
+    placement.length = sizeof(placement);
+    if (GetWindowPlacement(hwnd, &placement)) {
+        const RECT adjusted_rect = NormalizeWindowRectToVisibleArea(placement.rcNormalPosition);
+        if (!RectsEqual(adjusted_rect, placement.rcNormalPosition)) {
+            placement.rcNormalPosition = adjusted_rect;
+            if (!SetWindowPlacement(hwnd, &placement)) {
+                LogLastError(L"SetWindowPlacement(BringWindowToForeground)");
+            }
+        }
+    } else {
+        LogLastError(L"GetWindowPlacement(BringWindowToForeground)");
     }
 
     if (IsIconic(hwnd)) {
@@ -343,10 +441,16 @@ bool MainWindow::CreateMainWindow(int show_command) {
         settings_values_.window_width > 0 &&
         settings_values_.window_height > 0;
     if (has_saved_window_rect) {
-        width = requested_width;
-        height = requested_height;
-        left = settings_values_.window_left;
-        top = settings_values_.window_top;
+        const RECT saved_rect = BuildRectFromPositionSize(
+            settings_values_.window_left,
+            settings_values_.window_top,
+            requested_width,
+            requested_height);
+        const RECT visible_rect = NormalizeWindowRectToVisibleArea(saved_rect);
+        left = visible_rect.left;
+        top = visible_rect.top;
+        width = static_cast<int>(visible_rect.right - visible_rect.left);
+        height = static_cast<int>(visible_rect.bottom - visible_rect.top);
     }
 
     hwnd_ = CreateWindowExW(
@@ -666,6 +770,29 @@ void MainWindow::SaveLayoutSettings() const {
         }
     }
     settings_.Save(values);
+}
+
+void MainWindow::EnsureWindowPlacementVisible() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+
+    WINDOWPLACEMENT placement = {};
+    placement.length = sizeof(placement);
+    if (!GetWindowPlacement(hwnd_, &placement)) {
+        LogLastError(L"GetWindowPlacement(EnsureWindowPlacementVisible)");
+        return;
+    }
+
+    const RECT adjusted_rect = NormalizeWindowRectToVisibleArea(placement.rcNormalPosition);
+    if (RectsEqual(adjusted_rect, placement.rcNormalPosition)) {
+        return;
+    }
+
+    placement.rcNormalPosition = adjusted_rect;
+    if (!SetWindowPlacement(hwnd_, &placement)) {
+        LogLastError(L"SetWindowPlacement(EnsureWindowPlacementVisible)");
+    }
 }
 
 bool MainWindow::ApplySidebarWidthFromPointerX(int pointer_x) {
@@ -1239,6 +1366,7 @@ void MainWindow::RestartFolderWatcher(const std::wstring& path) {
     KillTimer(hwnd_, kFolderRefreshDebounceTimerId);
     pending_debounced_refresh_ = false;
     pending_debounced_refresh_generation_ = 0;
+    last_auto_folder_refresh_tick_ms_ = 0;
     StopFolderWatcher();
 
     const std::wstring normalized_path = NormalizePath(path);
@@ -1312,6 +1440,7 @@ void MainWindow::StopFolderWatcher() {
     watched_folder_path_.clear();
     pending_debounced_refresh_ = false;
     pending_debounced_refresh_generation_ = 0;
+    last_auto_folder_refresh_tick_ms_ = 0;
 }
 
 bool MainWindow::HandleTabKeyboardShortcut(WPARAM key_code, bool ctrl_down, bool shift_down) {
@@ -1554,6 +1683,23 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
     case WM_DPICHANGED:
         OnDpiChanged(HIWORD(w_param), reinterpret_cast<RECT*>(l_param));
         return 0;
+
+    case WM_ACTIVATE:
+        if (LOWORD(w_param) != WA_INACTIVE && file_list_hwnd_ != nullptr && !IsIconic(hwnd_)) {
+            SetFocus(file_list_hwnd_);
+        }
+        break;
+
+    case WM_DISPLAYCHANGE:
+        EnsureWindowPlacementVisible();
+        return 0;
+
+    case WM_SETTINGCHANGE:
+        if (w_param == SPI_SETWORKAREA) {
+            EnsureWindowPlacementVisible();
+            return 0;
+        }
+        break;
 
     case WM_KEYDOWN: {
         const bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
@@ -1967,8 +2113,24 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
             KillTimer(hwnd_, kFolderRefreshDebounceTimerId);
             if (pending_debounced_refresh_ &&
                 pending_debounced_refresh_generation_ == folder_watch_generation_.load(std::memory_order_acquire)) {
+                const uint64_t pending_generation = pending_debounced_refresh_generation_;
+                const ULONGLONG now = GetTickCount64();
+                if (last_auto_folder_refresh_tick_ms_ != 0 &&
+                    now - last_auto_folder_refresh_tick_ms_ < kAutoFolderRefreshMinIntervalMs) {
+                    const ULONGLONG remaining = kAutoFolderRefreshMinIntervalMs - (now - last_auto_folder_refresh_tick_ms_);
+                    const UINT retry_delay =
+                        static_cast<UINT>((std::min)(remaining, static_cast<ULONGLONG>(0xFFFFFFFFu)));
+                    if (SetTimer(hwnd_, kFolderRefreshDebounceTimerId, retry_delay, nullptr) == 0) {
+                        LogLastError(L"SetTimer(FolderRefreshThrottle)");
+                    }
+                    pending_debounced_refresh_ = true;
+                    pending_debounced_refresh_generation_ = pending_generation;
+                    return 0;
+                }
+
                 pending_debounced_refresh_ = false;
                 pending_debounced_refresh_generation_ = 0;
+                last_auto_folder_refresh_tick_ms_ = now;
                 if (const TabState* active = tab_manager_.active_tab(); active != nullptr) {
                     StartFolderLoad(active->path, true);
                 }

@@ -182,7 +182,7 @@ private:
     void DrawLoadingOverlay(HDC hdc) const;
     void CaptureViewState(std::vector<std::wstring>* selected_names, std::wstring* focused_name, int* top_index) const;
     void RestoreViewState(const std::vector<std::wstring>& selected_names, const std::wstring& focused_name, int top_index);
-    void ApplyRefreshDelta(std::vector<FileEntry> incoming_entries);
+    bool ApplyRefreshDelta(std::vector<FileEntry> incoming_entries);
 
     void ClearSelection();
     void SanitizeSelectionAndFocus();

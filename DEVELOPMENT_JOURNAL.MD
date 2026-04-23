@@ -17,17 +17,20 @@ Rule: If the journal says something is done, it is done.
 Rule: If something is undone or broken, it must be logged here.  
 Rule: Decisions must be explained, not just stated.
 
+MANDATORY RELEASE RULE: Deployment executable filename must always include the full version revision (for example `FileExplorer_v1.0.1.exe`).  
+This is a MUST for every future deploy.
+
 ---
 
 ## Current Status
 
 ```text
-Last updated:      2026-04-22 by assistant
+Last updated:      2026-04-23 by assistant
 Current phase:     Phase 15 - Portable Release Build
 Current target:    CP-15 - PASS
 Last checkpoint:   CP-15 - PASS
-Build status:      PASS - Release x64 build verified; portable package produced
-Tests status:      PASS - FileExplorer.Tests.exe runs and passes (56 tests, 0 failures)
+Build status:      PASS - Date Modified sort now mixes folders/files by timestamp; other columns keep folder-first
+Tests status:      PASS - FileExplorer.Tests.exe runs and passes (57 tests, 0 failures)
 Blockers:          None
 ```
 
@@ -538,11 +541,217 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** Keep version metadata absent (rejected: fails CP-15), ship release output folder with build artifacts (`.pdb`, `.obj`) (rejected: not clean portable package), defer portable first-run verification (rejected).  
 **Status:** Closed
 
+### AD-078 - 2026-04-23 - Stabilize Auto-Refresh UX + Keep Window Placement On-Screen Across Monitor Topology Changes
+**Decision:** Apply a three-part reliability fix: (1) suppress loading spinner for incremental watcher refreshes, (2) skip no-op incremental refresh UI rebuilds when folder content is unchanged, and (3) normalize/restamp `rcNormalPosition` onto a visible monitor during startup, foreground activation, and display/work-area change events (`WM_DISPLAYCHANGE`, `SPI_SETWORKAREA`). Also throttle watcher-triggered auto-refresh cadence to avoid rapid repeated refresh churn.  
+**Rationale:** User reported frequent loading/flicker in volatile folders (notably `C:\\Windows`) and off-screen window restore behavior after laptop dock/undock monitor changes.  
+**Alternatives considered:** Disable folder watcher entirely (rejected: loses incremental freshness), require maximize-only recovery for off-screen windows (rejected: poor UX), keep saved coordinates unvalidated (rejected: reproduces hidden-window issue on topology change).  
+**Status:** Closed
+
+### AD-079 - 2026-04-23 - Flyout Click-Stability Guard + Activation Focus + Mouse XButton Navigation + Shortcut Target Routing
+**Decision:** Apply a combined interaction fix set: (1) add an initial mouse-release suppression guard in sidebar flyout menu handling so the click that opens a flyout cannot be misinterpreted as an immediate selection, (2) enforce details-pane focus on app re-activation (`WM_ACTIVATE`) for immediate arrow-key navigation, (3) map mouse `XBUTTON1/XBUTTON2` in the details pane to Back/Forward nav commands, and (4) resolve `.lnk` targets before launch so folder shortcuts route internally in FileExplorer instead of delegating to Explorer.  
+**Rationale:** User reported flyout popups collapsing immediately on click in non-maximized/large-folder scenarios, missing keyboard readiness after returning to app focus, missing mouse back/forward behavior, and `.lnk` shortcut opens escaping to Explorer.  
+**Alternatives considered:** Remove submenu click-open bridge entirely (rejected due prior submenu-parent regression history), keep activation focus behavior as-is (rejected due UX friction), and rely on raw `ShellExecuteW` for `.lnk` files (rejected due folder shortcuts opening outside FileExplorer).  
+**Status:** Closed
+
+### AD-080 - 2026-04-23 - v1.0.1.0 Portable Revision Packaging Standardization
+**Decision:** Ship a new portable revision as `FileExplorer_v1.0.1_portable` with release binary metadata bumped to `1.0.1.0` and include a dedicated revision notes artifact (`REVISION.txt`) alongside `README.txt` and `FileExplorer.exe`.  
+**Rationale:** User requested deployment of a new portable version with software-style revision notes and a clear package location for testing/distribution.  
+**Alternatives considered:** Reuse `v1.0` folder in place (rejected to preserve old package traceability), keep version metadata at `1.0.0.0` (rejected for release clarity), and place changelog only in repository docs (rejected; package-local revision file requested).  
+**Status:** Closed
+
+### AD-081 - 2026-04-23 - Version-In-Filename Deployment Policy (Mandatory)
+**Decision:** Enforce a mandatory deployment naming convention: every deploy artifact filename must include the shipped version (folder/archive/package names), for example `FileExplorer_v1.0.1_portable.zip`.  
+**Rationale:** User requested explicit version presence in deployment filenames for traceability and operational clarity.  
+**Alternatives considered:** Keep non-versioned or implicitly versioned artifact names (rejected: ambiguous release tracking).  
+**Status:** Closed
+
+### AD-082 - 2026-04-23 - Executable Filename Must Include Revision (Mandatory Clarification)
+**Decision:** Clarify and enforce that the deployed executable filename itself must include revision/version (for example `FileExplorer_v1.0.1.exe`), not only folder/archive names.  
+**Rationale:** User clarified requirement specifically targets the EXE filename for release visibility and operational certainty.  
+**Alternatives considered:** Keep EXE as `FileExplorer.exe` while versioning only container artifacts (rejected).  
+**Status:** Closed
+
+### AD-083 - 2026-04-23 - Date Modified Sort Exception: Folders Must Sort With Files
+**Decision:** For `Date Modified` sorting, disable folder-first partitioning so folders and files are sorted together by modified timestamp. Keep folder-first behavior unchanged for all other sort columns.  
+**Rationale:** User requested chronological placement in Date Modified view; forcing folders to the top hid recency ordering and broke expected time-based scanning.  
+**Alternatives considered:** Keep global folder-first rule for Date Modified (rejected), remove folder-first behavior for all columns (rejected).  
+**Status:** Closed
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 078 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release sort behavior refinement)  
+**Goal for this session:** Change Date Modified sorting so folders are not pinned to top and instead sort in normal chronological order with files.  
+**Completed:**  
+- Updated Date Modified sort comparator in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - folder-first partitioning now applies to non-date columns only
+  - `Date Modified` now sorts folders and files together by timestamp.  
+- Updated unit-test local comparator + added regression coverage in [test_sort.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer.Tests/tests/test_sort.cpp):
+  - retained `FolderAlwaysFirst` behavior for non-date sorts
+  - added `DateModifiedTreatsFoldersLikeFiles` test to lock in mixed folder/file chronological ordering.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:diag` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed, 0 failed`).  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-083  
+**Errors encountered and resolved:**  
+- `msbuild` not found on PATH in this shell; resolved by invoking full MSBuild path from VS installation.
+- Direct build of `FileExplorer.Tests.vcxproj` in this environment failed include resolution; resolved by building solution and running test executable directly.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates Date Modified sorting behavior in UI with mixed folders/files and confirms expected ordering.
+
+### Session 077 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (exe naming clarification + redeploy)  
+**Goal for this session:** Apply clarified requirement that the deployed EXE filename itself includes revision, then redeploy.  
+**Completed:**  
+- Updated portable package executable name to include revision:
+  - `FileExplorer.exe` -> `FileExplorer_v1.0.1.exe` in [FileExplorer_v1.0.1_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.1_portable)  
+- Updated package docs to match executable naming:
+  - [README.txt](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.1_portable/README.txt)
+  - [REVISION.txt](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.1_portable/REVISION.txt)  
+- Rebuilt deploy archive:
+  - [FileExplorer_v1.0.1_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.1_portable.zip)  
+- Verified packaged EXE metadata at renamed path:
+  - `FileVersion = 1.0.1.0`
+  - `ProductVersion = 1.0.1.0`
+  - `ProductName = FileExplorer`  
+- Ran regression tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` -> `56 passed`, `0 failed`.  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-082  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- Keep EXE versioned naming as the default deploy convention for all future releases.
+
+### Session 076 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (redeploy naming policy enforcement)  
+**Goal for this session:** Enforce mandatory version-in-filename deployment rule in journal and redeploy artifact accordingly.  
+**Completed:**  
+- Added a mandatory journal rule that deployment artifact filenames must always include the full version.  
+- Added AD-081 to formalize the deployment naming policy as a must-have release standard.  
+- Redeployed artifact with explicit version in filename:
+  - [FileExplorer_v1.0.1_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.1_portable.zip)  
+- Verified packaged folder remains available:
+  - [FileExplorer_v1.0.1_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.1_portable)  
+- Ran regression tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` -> `56 passed`, `0 failed`.  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-081  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- Keep versioned deployment naming for all future release artifacts by default.
+
+### Session 075 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (revision packaging)  
+**Goal for this session:** Deploy a new portable revision only (no feature work), with proper per-version revision notes in package.  
+**Completed:**  
+- Updated release metadata in [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc):
+  - `FILEVERSION` -> `1,0,1,0`
+  - `PRODUCTVERSION` -> `1,0,1,0`
+  - `FileVersion` / `ProductVersion` strings -> `1.0.1.0`.  
+- Built `Release|x64` successfully (`0 errors`, `0 warnings`) via `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Release /p:Platform=x64 /m`.  
+- Created new portable package folder [FileExplorer_v1.0.1_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.1_portable) containing:
+  - `FileExplorer.exe`
+  - `README.txt`
+  - `REVISION.txt` (versioned release notes for `1.0.1.0`).  
+- Verified packaged executable metadata:
+  - `FileVersion = 1.0.1.0`
+  - `ProductVersion = 1.0.1.0`
+  - `ProductName = FileExplorer`.  
+- Ran regression tests: `x64\\Debug\\FileExplorer.Tests.exe` -> `56 passed`, `0 failed`.  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-080  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates the new `v1.0.1` portable package and confirms release-note format/content expectations for future revisions.
+
+### Session 074 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release interaction reliability fixes)  
+**Goal for this session:** Fix flyout popup auto-close regression and deliver three requested UX behaviors: focus-on-return, mouse back/forward buttons, and `.lnk` folder shortcuts opening in FileExplorer.  
+**Completed:**  
+- Flyout stability fix in [Sidebar.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/Sidebar.cpp) and [Sidebar.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/Sidebar.h):
+  - introduced `flyout_ignore_initial_mouse_release_` guard
+  - suppresses the initial mouse-down/up transition that belongs to flyout-open action so popup is not immediately auto-selected/closed
+  - keeps existing submenu command/hook selection paths for intentional in-menu clicks.  
+- App re-activation focus fix in [MainWindow.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/MainWindow.cpp):
+  - `WM_ACTIVATE` now restores focus to details pane (`file_list_hwnd_`) when app becomes active, enabling immediate arrow-key navigation.  
+- Mouse side-button navigation in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - `WM_XBUTTONUP` support added
+  - `XBUTTON1` -> Back, `XBUTTON2` -> Forward (via `WM_FE_NAV_COMMAND`).  
+- `.lnk` internal routing in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp) and [Sidebar.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/Sidebar.cpp):
+  - added shortcut-target resolution (`IShellLinkW` + `IPersistFile`)
+  - when shortcut target resolves to a folder, navigation is routed back into FileExplorer (`WM_FE_FILELIST_NAVIGATE` / sidebar navigate path) rather than handing off to Explorer
+  - non-folder targets continue with normal shell open behavior.  
+- Build/test verification:
+  - `Debug x64` app build PASS (`FileExplorer.vcxproj`)
+  - test build PASS:
+    - `MSBuild.exe FileExplorer.Tests\\FileExplorer.Tests.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:SolutionDir=C:\\Users\\Administrator\\repos\\FastExplorer\\ /m`
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`56 passed, 0 failed`).  
+**Not completed / carried forward:**  
+- Runtime validation on the exact user laptop/monitor/flyout scenarios pending user confirmation.  
+**Decisions made:** AD-079  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates flyout behavior on laptop (normal window + large-folder flyouts), then proceed with any residual tuning if needed.
+
+### Session 073 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release reliability fixes)  
+**Goal for this session:** Investigate and fix user-reported refresh flicker in volatile folders and off-screen window restore behavior after monitor detach/dock transitions.  
+**Completed:**  
+- Root-cause analysis completed for two user-reported issues:
+  - frequent visible loading overlay/flicker caused by watcher-driven incremental refreshes
+  - saved normal window rects restoring off-screen when monitor topology changed (laptop closed/open, external monitors detached).  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp) and [FileListView.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.h):
+  - incremental refresh (`BeginFolderLoad(..., true)`) no longer shows loading spinner
+  - incremental refresh now short-circuits UI rebuild when no actual entry delta is detected (`ApplyRefreshDelta` returns `false`).  
+- Updated [MainWindow.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/MainWindow.cpp) and [MainWindow.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/MainWindow.h):
+  - added visibility-normalization helpers for saved/normal window rects
+  - applied on-screen placement enforcement in startup restore path, foreground bring path, and runtime display/work-area change handling (`WM_DISPLAYCHANGE`, `SPI_SETWORKAREA`)
+  - added watcher auto-refresh throttle (`kAutoFolderRefreshMinIntervalMs = 1500`) to reduce rapid repeated refresh churn in noisy folders.  
+- Build/test verification:
+  - `Debug x64` app build PASS (`FileExplorer.vcxproj`)
+  - tests project build PASS with required invocation:
+    - `MSBuild.exe FileExplorer.Tests\\FileExplorer.Tests.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:SolutionDir=C:\\Users\\Administrator\\repos\\FastExplorer\\ /m`
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`56 passed, 0 failed`).  
+**Not completed / carried forward:**  
+- User runtime validation on the reported real-laptop scenarios (volatile `C:\\Windows` folder + dock/undock monitor transition) pending.  
+- Explorer-intercept toggle request intentionally not implemented in this session (design/risk discussion first).  
+**Decisions made:** AD-078  
+**Errors encountered and resolved:**  
+- `msbuild` not on PATH in this environment; resolved by invoking full MSBuild path under Visual Studio 18.  
+- `FileExplorer.Tests.vcxproj` include-path resolution fails when `SolutionDir` is omitted; resolved by using explicit `/p:SolutionDir=...` invocation (same pattern already used in prior journal sessions).  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User verifies both fixes on laptop + external monitor workflow, then decide whether to proceed with Explorer-integration strategy (file associations / shell registration / full shell replacement options).
 
 ### Session 072 - 2026-04-22
 **Phase:** Phase 15 - Portable Release Build (checkpoint closure)  
@@ -2382,6 +2591,68 @@ Severity: Blocker | High | Low | Debt
 ---
 
 ## Test Results Log
+
+### Test Run 067 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-Date-Modified sort behavior update regression run)  
+**Failures:**  
+- None
+
+### Test Run 066 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-EXE-versioned-name redeploy regression run)  
+**Failures:**  
+- None
+
+### Test Run 065 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-redeploy naming-policy enforcement regression run)  
+**Failures:**  
+- None
+
+### Test Run 064 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-v1.0.1 portable packaging regression run)  
+**Failures:**  
+- None
+
+### Test Run 063 - 2026-04-23
+**Configuration:** Debug x64  
+**Build command:** `MSBuild.exe FileExplorer.Tests\\FileExplorer.Tests.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:SolutionDir=C:\\Users\\Administrator\\repos\\FastExplorer\\ /m`  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-flyout/input/shortcut-routing regression run)  
+**Failures:**  
+- None
+
+### Test Run 062 - 2026-04-23
+**Configuration:** Debug x64  
+**Build command:** `MSBuild.exe FileExplorer.Tests\\FileExplorer.Tests.vcxproj /p:Configuration=Debug /p:Platform=x64 /p:SolutionDir=C:\\Users\\Administrator\\repos\\FastExplorer\\ /m`  
+**Test count:** 56  
+**Passed:** 56  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-refresh-flicker + monitor-placement reliability fix regression run)  
+**Failures:**  
+- None
 
 ### Test Run 061 - 2026-04-22
 **Configuration:** Debug x64  

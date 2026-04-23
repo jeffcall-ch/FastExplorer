@@ -1,10 +1,12 @@
 #include "FileListView.h"
 #include "FileOps.h"
+#include "NavBar.h"
 #include "Colors.h"
 
 #include <Objbase.h>
 #include <Shellapi.h>
 #include <ShlObj.h>
+#include <Shobjidl.h>
 #include <Shlwapi.h>
 #include <Windowsx.h>
 #include <strsafe.h>
@@ -74,6 +76,81 @@ void LogHResult(const wchar_t* context, HRESULT hr) {
     wchar_t buffer[256] = {};
     swprintf_s(buffer, L"[FileExplorer] %s failed (HRESULT=0x%08lX).\r\n", context, static_cast<unsigned long>(hr));
     OutputDebugStringW(buffer);
+}
+
+bool EndsWithInsensitive(const std::wstring& text, const wchar_t* suffix) {
+    if (suffix == nullptr) {
+        return false;
+    }
+
+    const size_t suffix_length = wcslen(suffix);
+    if (suffix_length == 0 || text.size() < suffix_length) {
+        return false;
+    }
+
+    const wchar_t* tail = text.c_str() + (text.size() - suffix_length);
+    const int compare = CompareStringOrdinal(
+        tail,
+        static_cast<int>(suffix_length),
+        suffix,
+        static_cast<int>(suffix_length),
+        TRUE);
+    return compare == CSTR_EQUAL;
+}
+
+bool TryResolveShortcutTarget(
+    const std::wstring& shortcut_path,
+    std::wstring* target_path,
+    bool* target_is_folder) {
+    if (target_path == nullptr || target_is_folder == nullptr) {
+        return false;
+    }
+    if (!EndsWithInsensitive(shortcut_path, L".lnk")) {
+        return false;
+    }
+
+    IShellLinkW* shell_link = nullptr;
+    HRESULT hr = CoCreateInstance(
+        CLSID_ShellLink,
+        nullptr,
+        CLSCTX_INPROC_SERVER,
+        IID_PPV_ARGS(&shell_link));
+    if (FAILED(hr) || shell_link == nullptr) {
+        return false;
+    }
+
+    IPersistFile* persist_file = nullptr;
+    hr = shell_link->QueryInterface(IID_PPV_ARGS(&persist_file));
+    if (FAILED(hr) || persist_file == nullptr) {
+        shell_link->Release();
+        return false;
+    }
+
+    hr = persist_file->Load(shortcut_path.c_str(), STGM_READ);
+    if (SUCCEEDED(hr)) {
+        (void)shell_link->Resolve(nullptr, SLR_NO_UI | SLR_NOUPDATE | SLR_NOTRACK);
+
+        WIN32_FIND_DATAW find_data = {};
+        wchar_t resolved_path[MAX_PATH] = {};
+        hr = shell_link->GetPath(resolved_path, static_cast<int>(std::size(resolved_path)), &find_data, SLGP_RAWPATH);
+        if (SUCCEEDED(hr) && resolved_path[0] != L'\0') {
+            *target_path = resolved_path;
+            DWORD attributes = find_data.dwFileAttributes;
+            if (attributes == 0 || attributes == INVALID_FILE_ATTRIBUTES) {
+                attributes = GetFileAttributesW(resolved_path);
+            }
+            *target_is_folder =
+                attributes != INVALID_FILE_ATTRIBUTES &&
+                (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+            persist_file->Release();
+            shell_link->Release();
+            return true;
+        }
+    }
+
+    persist_file->Release();
+    shell_link->Release();
+    return false;
 }
 
 std::wstring ToLowerCopy(std::wstring value) {
@@ -320,7 +397,8 @@ void FileListView::BeginFolderLoad(const std::wstring& path, bool incremental_re
     type_ahead_buffer_.clear();
     type_ahead_last_tick_ = 0;
 
-    SetLoadingState(true);
+    // Incremental refresh keeps current content visible and should avoid spinner flicker.
+    SetLoadingState(!incremental_refresh);
     PostStatusUpdate();
 }
 
@@ -328,11 +406,19 @@ void FileListView::ApplyLoadedFolderEntries(std::vector<FileEntry> entries, bool
     std::vector<std::wstring> selected_names;
     std::wstring focused_name;
     int top_index = (hwnd_ != nullptr) ? ListView_GetTopIndex(hwnd_) : 0;
+    bool list_changed = true;
     if (incremental_refresh) {
         CaptureViewState(&selected_names, &focused_name, &top_index);
-        ApplyRefreshDelta(std::move(entries));
+        list_changed = ApplyRefreshDelta(std::move(entries));
     } else {
         base_entries_ = std::move(entries);
+    }
+
+    if (!list_changed) {
+        SetLoadingState(false);
+        pending_incremental_refresh_ = false;
+        PostStatusUpdate();
+        return;
     }
 
     SortBaseEntries();
@@ -1587,6 +1673,28 @@ LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM
         break;
     }
 
+    case WM_XBUTTONUP: {
+        if (parent_hwnd_ == nullptr) {
+            return TRUE;
+        }
+
+        NavCommand command = NavCommand::Back;
+        const WORD xbutton = GET_XBUTTON_WPARAM(w_param);
+        if (xbutton == XBUTTON1) {
+            command = NavCommand::Back;
+        } else if (xbutton == XBUTTON2) {
+            command = NavCommand::Forward;
+        } else {
+            return FALSE;
+        }
+
+        if (!PostMessageW(parent_hwnd_, WM_FE_NAV_COMMAND, static_cast<WPARAM>(command), 0)) {
+            LogLastError(L"PostMessageW(WM_FE_NAV_COMMAND XBUTTON)");
+            return FALSE;
+        }
+        return TRUE;
+    }
+
     case WM_CONTEXTMENU: {
         POINT screen_point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
         int hit_index = -1;
@@ -1655,7 +1763,8 @@ LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM
 
 void FileListView::SortBaseEntries() {
     auto compare = [this](const FileEntry& left, const FileEntry& right) {
-        if (left.is_folder != right.is_folder) {
+        const bool enforce_folders_first = sort_column_ != SortColumn::DateModified;
+        if (enforce_folders_first && left.is_folder != right.is_folder) {
             return left.is_folder;
         }
 
@@ -2031,7 +2140,7 @@ void FileListView::RestoreViewState(
     }
 }
 
-void FileListView::ApplyRefreshDelta(std::vector<FileEntry> incoming_entries) {
+bool FileListView::ApplyRefreshDelta(std::vector<FileEntry> incoming_entries) {
     std::unordered_map<std::wstring, FileEntry> incoming_by_key;
     incoming_by_key.reserve(incoming_entries.size());
     for (FileEntry& entry : incoming_entries) {
@@ -2040,19 +2149,26 @@ void FileListView::ApplyRefreshDelta(std::vector<FileEntry> incoming_entries) {
 
     std::vector<FileEntry> merged_entries;
     merged_entries.reserve(incoming_by_key.size());
+    bool changed = false;
 
     for (const FileEntry& current : base_entries_) {
         auto it = incoming_by_key.find(EntryKey(current));
         if (it == incoming_by_key.end()) {
+            changed = true;
             continue;
         }
 
         if (EntriesEquivalent(current, it->second)) {
             merged_entries.push_back(current);
         } else {
+            changed = true;
             merged_entries.push_back(std::move(it->second));
         }
         incoming_by_key.erase(it);
+    }
+
+    if (!incoming_by_key.empty()) {
+        changed = true;
     }
 
     for (auto& [key, entry] : incoming_by_key) {
@@ -2060,7 +2176,16 @@ void FileListView::ApplyRefreshDelta(std::vector<FileEntry> incoming_entries) {
         merged_entries.push_back(std::move(entry));
     }
 
+    if (!changed && merged_entries.size() != base_entries_.size()) {
+        changed = true;
+    }
+
+    if (!changed) {
+        return false;
+    }
+
     base_entries_ = std::move(merged_entries);
+    return true;
 }
 
 void FileListView::ClearSelection() {
@@ -2293,10 +2418,24 @@ bool FileListView::OpenEntryAtIndex(int index, bool open_files_too) {
         return false;
     }
 
+    std::wstring launch_target = full_path;
+    bool launch_target_is_folder = false;
+    if (TryResolveShortcutTarget(full_path, &launch_target, &launch_target_is_folder)) {
+        if (launch_target_is_folder) {
+            auto payload = std::make_unique<std::wstring>(NormalizePath(std::move(launch_target)));
+            if (!PostMessageW(parent_hwnd_, WM_FE_FILELIST_NAVIGATE, 0, reinterpret_cast<LPARAM>(payload.get()))) {
+                LogLastError(L"PostMessageW(WM_FE_FILELIST_NAVIGATE Shortcut)");
+                return false;
+            }
+            payload.release();
+            return true;
+        }
+    }
+
     const HINSTANCE open_result = ShellExecuteW(
         nullptr,
         L"open",
-        full_path.c_str(),
+        launch_target.c_str(),
         nullptr,
         nullptr,
         SW_SHOWNORMAL);

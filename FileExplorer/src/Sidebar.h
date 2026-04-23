@@ -206,6 +206,7 @@ private:
     bool flyout_pending_selection_{false};
     FlyoutCommandTarget flyout_pending_target_{};
     bool flyout_menu_left_button_was_down_{false};
+    bool flyout_ignore_initial_mouse_release_{false};
     HHOOK flyout_menu_hook_{nullptr};
     RECT clear_button_rect_{};
     bool clear_button_visible_{false};
