@@ -34,6 +34,7 @@ public:
     void Refresh();
 
     bool IsDraggableGap(POINT parent_client_point) const;
+    bool CloseTabFromParentClientPoint(POINT parent_client_point);
 
 private:
     enum class HitPart {
@@ -74,7 +75,11 @@ private:
     void HandleMouseLeave();
     void HandleLeftButtonDown(POINT point);
     void HandleLeftButtonUp(POINT point);
+    void HandleMiddleButtonDown(POINT point);
+    void HandleMiddleButtonUp(POINT point);
     void HandleRightClick(POINT point_screen, POINT point_client);
+    bool CloseTabAtClientPoint(POINT point);
+    void RebuildLayoutForHitTesting();
     void HandleTabDragMove(POINT point);
     void ResetTabDragState(bool release_capture);
     int TabIndexForDragPoint(POINT point) const;

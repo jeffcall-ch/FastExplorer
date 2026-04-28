@@ -15,6 +15,7 @@ public:
         bool show_extensions = true;
         std::wstring theme = L"dark";
         int sidebar_width_logical = 320;
+        int file_list_detail_scale_percent = 100;
         FileListColumnWidthsLogical file_list_column_widths_logical{{260, 60, 140, 90, 320}};
         int window_left = 100;
         int window_top = 80;
@@ -33,6 +34,7 @@ public:
     const std::wstring& storage_path() const noexcept;
 
     static int ClampSidebarWidthLogical(int value) noexcept;
+    static int ClampFileListDetailScalePercent(int value) noexcept;
     static int ClampFileListColumnWidthLogical(int column_index, int value) noexcept;
 
 private:

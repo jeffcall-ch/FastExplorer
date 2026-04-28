@@ -388,6 +388,21 @@ bool FileOps::PasteFromClipboard(HWND owner, const std::wstring& destination_fol
     return copied_any;
 }
 
+bool FileOps::ImportPaths(
+    HWND owner,
+    const std::vector<std::wstring>& source_paths,
+    const std::wstring& destination_folder,
+    bool move) {
+    if (source_paths.empty() || destination_folder.empty()) {
+        return false;
+    }
+
+    const UINT operation = move ? FO_MOVE : FO_COPY;
+    const FILEOP_FLAGS flags = FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR | FOF_NOCONFIRMATION;
+    bool aborted = false;
+    return PerformShellOperation(owner, operation, source_paths, destination_folder, flags, &aborted);
+}
+
 bool FileOps::DeleteToRecycleBin(HWND owner, const std::vector<std::wstring>& paths) {
     bool aborted = false;
     const FILEOP_FLAGS flags = FOF_ALLOWUNDO | FOF_NOCONFIRMATION;

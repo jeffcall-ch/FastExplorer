@@ -4,6 +4,9 @@
 #include "Colors.h"
 
 #include <Objbase.h>
+#include <Objidl.h>
+#include <Ole2.h>
+#include <OleIdl.h>
 #include <Shellapi.h>
 #include <ShlObj.h>
 #include <Shobjidl.h>
@@ -13,9 +16,12 @@
 #include <uxtheme.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cwchar>
 #include <cwctype>
 #include <memory>
+#include <new>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -56,6 +62,8 @@ constexpr UINT kMenuOpenFileLocation = 7010;
 constexpr UINT kMenuNewFolder = 7011;
 constexpr UINT kMenuToggleShowHidden = 7012;
 constexpr UINT kMenuToggleShowExtensions = 7013;
+constexpr UINT kMenuIncreaseDetailScale = 7014;
+constexpr UINT kMenuResetDetailScale = 7015;
 constexpr UINT_PTR kRenameEditSubclassId = 2;
 constexpr UINT_PTR kHeaderEraseSubclassId = 3;
 constexpr UINT kShellMenuCommandFirst = 7400;
@@ -64,6 +72,12 @@ constexpr DWORD kTypeAheadResetMs = 1200;
 constexpr UINT kLoadingTimerMs = 80;
 constexpr int kMinColumnWidthLogical = 40;
 constexpr int kMaxColumnWidthLogical = 1800;
+constexpr int kDefaultDetailScalePercent = 100;
+constexpr int kDetailScaleMinPercent = 100;
+constexpr int kDetailScaleMaxPercent = 300;
+constexpr int kListBodyPointSize = 9;
+constexpr int kListHeaderPointSize = 9;
+constexpr int kListRowPaddingLogical = 4;
 
 void LogLastError(const wchar_t* context) {
     const DWORD error_code = GetLastError();
@@ -96,6 +110,62 @@ bool EndsWithInsensitive(const std::wstring& text, const wchar_t* suffix) {
         static_cast<int>(suffix_length),
         TRUE);
     return compare == CSTR_EQUAL;
+}
+
+bool TryGetMenuItemTextByPosition(HMENU menu, UINT position, std::wstring* text) {
+    if (menu == nullptr || text == nullptr) {
+        return false;
+    }
+
+    text->clear();
+    const int required_chars = GetMenuStringW(menu, position, nullptr, 0, MF_BYPOSITION);
+    if (required_chars <= 0) {
+        return false;
+    }
+
+    std::vector<wchar_t> buffer(static_cast<size_t>(required_chars) + 1U, L'\0');
+    const int copied_chars = GetMenuStringW(
+        menu,
+        position,
+        buffer.data(),
+        static_cast<int>(buffer.size()),
+        MF_BYPOSITION);
+    if (copied_chars <= 0) {
+        return false;
+    }
+
+    text->assign(buffer.data(), static_cast<size_t>(copied_chars));
+    return true;
+}
+
+std::wstring NormalizeMenuLabel(const std::wstring& text) {
+    std::wstring normalized;
+    normalized.reserve(text.size());
+    for (wchar_t ch : text) {
+        if (ch == L'&') {
+            continue;
+        }
+        if (ch == L'\t') {
+            break;
+        }
+        normalized.push_back(static_cast<wchar_t>(std::towlower(ch)));
+    }
+
+    const size_t first_non_space = normalized.find_first_not_of(L" ");
+    if (first_non_space == std::wstring::npos) {
+        return std::wstring();
+    }
+    const size_t last_non_space = normalized.find_last_not_of(L" ");
+    return normalized.substr(first_non_space, (last_non_space - first_non_space) + 1U);
+}
+
+bool IsSevenZipMenuLabel(const std::wstring& text) {
+    const std::wstring normalized = NormalizeMenuLabel(text);
+    if (normalized.empty()) {
+        return false;
+    }
+    return normalized.find(L"7-zip") != std::wstring::npos ||
+           normalized.find(L"7zip") != std::wstring::npos;
 }
 
 bool TryResolveShortcutTarget(
@@ -202,6 +272,33 @@ COLORREF LerpColor(COLORREF from, COLORREF to, int numerator, int denominator) {
         LerpChannel(GetBValue(from), GetBValue(to), numerator, denominator));
 }
 
+HBITMAP CreateTransparentDibBitmap(int width, int height) {
+    if (width <= 0 || height <= 0) {
+        return nullptr;
+    }
+
+    BITMAPINFO bitmap_info = {};
+    bitmap_info.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmap_info.bmiHeader.biWidth = width;
+    bitmap_info.bmiHeader.biHeight = -height;  // top-down
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+
+    void* bits = nullptr;
+    HBITMAP bitmap = CreateDIBSection(nullptr, &bitmap_info, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (bitmap == nullptr) {
+        return nullptr;
+    }
+
+    if (bits != nullptr) {
+        const size_t bytes = static_cast<size_t>(width) * static_cast<size_t>(height) * sizeof(DWORD);
+        ZeroMemory(bits, bytes);
+    }
+
+    return bitmap;
+}
+
 bool SameDate(const SYSTEMTIME& left, const SYSTEMTIME& right) {
     return left.wYear == right.wYear && left.wMonth == right.wMonth && left.wDay == right.wDay;
 }
@@ -260,8 +357,7 @@ HFONT CreateEmptyStateFont(int point_size, UINT dpi, LONG weight) {
         L"Segoe UI");
 }
 
-HFONT CreateUiFont(int point_size, UINT dpi, LONG weight) {
-    const int pixel_height = -MulDiv(point_size, static_cast<int>(dpi), 72);
+HFONT CreateUiFontFromPixelHeight(int pixel_height, LONG weight) {
     HFONT font = CreateFontW(
         pixel_height,
         0,
@@ -317,13 +413,914 @@ HFONT CreateMdl2Font(int point_size, UINT dpi, LONG weight) {
         L"Segoe MDL2 Assets");
 }
 
+HGLOBAL DuplicateHGlobal(HGLOBAL source) {
+    if (source == nullptr) {
+        return nullptr;
+    }
+
+    const SIZE_T bytes = GlobalSize(source);
+    if (bytes == 0U) {
+        return nullptr;
+    }
+
+    HGLOBAL copy = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (copy == nullptr) {
+        LogLastError(L"GlobalAlloc(DuplicateHGlobal)");
+        return nullptr;
+    }
+
+    void* source_block = GlobalLock(source);
+    if (source_block == nullptr) {
+        LogLastError(L"GlobalLock(DuplicateHGlobal Source)");
+        GlobalFree(copy);
+        return nullptr;
+    }
+
+    void* copy_block = GlobalLock(copy);
+    if (copy_block == nullptr) {
+        LogLastError(L"GlobalLock(DuplicateHGlobal Copy)");
+        GlobalUnlock(source);
+        GlobalFree(copy);
+        return nullptr;
+    }
+
+    CopyMemory(copy_block, source_block, bytes);
+    GlobalUnlock(copy);
+    GlobalUnlock(source);
+    return copy;
+}
+
+HGLOBAL CreateDropFilesHandle(const std::vector<std::wstring>& paths) {
+    if (paths.empty()) {
+        return nullptr;
+    }
+
+    size_t string_chars = 1;
+    for (const std::wstring& path : paths) {
+        if (!path.empty()) {
+            string_chars += path.size() + 1;
+        }
+    }
+
+    const SIZE_T bytes = sizeof(DROPFILES) + (string_chars * sizeof(wchar_t));
+    HGLOBAL drop_handle = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
+    if (drop_handle == nullptr) {
+        LogLastError(L"GlobalAlloc(DragDrop CF_HDROP)");
+        return nullptr;
+    }
+
+    void* block = GlobalLock(drop_handle);
+    if (block == nullptr) {
+        LogLastError(L"GlobalLock(DragDrop CF_HDROP)");
+        GlobalFree(drop_handle);
+        return nullptr;
+    }
+
+    DROPFILES* drop_files = reinterpret_cast<DROPFILES*>(block);
+    drop_files->pFiles = sizeof(DROPFILES);
+    drop_files->fWide = TRUE;
+
+    auto* cursor = reinterpret_cast<wchar_t*>(reinterpret_cast<BYTE*>(block) + sizeof(DROPFILES));
+    for (const std::wstring& path : paths) {
+        if (path.empty()) {
+            continue;
+        }
+        const size_t byte_count = path.size() * sizeof(wchar_t);
+        CopyMemory(cursor, path.c_str(), byte_count);
+        cursor += path.size();
+        *cursor++ = L'\0';
+    }
+    *cursor = L'\0';
+
+    GlobalUnlock(drop_handle);
+    return drop_handle;
+}
+
+HGLOBAL CreateDropEffectHandle(DWORD effect) {
+    HGLOBAL handle = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DWORD));
+    if (handle == nullptr) {
+        LogLastError(L"GlobalAlloc(DragDrop PreferredDropEffect)");
+        return nullptr;
+    }
+
+    void* block = GlobalLock(handle);
+    if (block == nullptr) {
+        LogLastError(L"GlobalLock(DragDrop PreferredDropEffect)");
+        GlobalFree(handle);
+        return nullptr;
+    }
+
+    *reinterpret_cast<DWORD*>(block) = effect;
+    GlobalUnlock(handle);
+    return handle;
+}
+
+FORMATETC CopyFormatEtc(const FORMATETC& source) {
+    FORMATETC copy = source;
+    if (source.ptd != nullptr) {
+        copy.ptd = static_cast<DVTARGETDEVICE*>(CoTaskMemAlloc(sizeof(DVTARGETDEVICE)));
+        if (copy.ptd != nullptr) {
+            CopyMemory(copy.ptd, source.ptd, sizeof(DVTARGETDEVICE));
+        }
+    }
+    return copy;
+}
+
+std::vector<std::wstring> ExtractDropPathsFromHandle(HDROP drop_handle) {
+    std::vector<std::wstring> paths;
+    if (drop_handle == nullptr) {
+        return paths;
+    }
+
+    const UINT file_count = DragQueryFileW(drop_handle, 0xFFFFFFFF, nullptr, 0);
+    paths.reserve(file_count);
+    for (UINT i = 0; i < file_count; ++i) {
+        const UINT length = DragQueryFileW(drop_handle, i, nullptr, 0);
+        if (length == 0U) {
+            continue;
+        }
+
+        std::wstring path(length, L'\0');
+        if (DragQueryFileW(drop_handle, i, path.data(), length + 1U) == 0U) {
+            continue;
+        }
+        paths.push_back(path);
+    }
+
+    return paths;
+}
+
+std::wstring JoinPathForDropTarget(const std::wstring& folder, const std::wstring& leaf_name) {
+    std::wstring path = folder;
+    if (!path.empty() && path.back() != L'\\') {
+        path.push_back(L'\\');
+    }
+    path.append(leaf_name);
+    return path;
+}
+
+bool TryFindDropNameConflict(
+    const std::vector<std::wstring>& source_paths,
+    const std::wstring& destination_path,
+    std::wstring* conflict_name) {
+    std::unordered_set<std::wstring> seen_names;
+    for (const std::wstring& source_path : source_paths) {
+        const wchar_t* leaf_ptr = PathFindFileNameW(source_path.c_str());
+        if (leaf_ptr == nullptr || *leaf_ptr == L'\0') {
+            continue;
+        }
+
+        const std::wstring leaf_name = leaf_ptr;
+        const std::wstring normalized_leaf = ToLowerCopy(leaf_name);
+        if (!seen_names.insert(normalized_leaf).second) {
+            if (conflict_name != nullptr) {
+                *conflict_name = leaf_name;
+            }
+            return true;
+        }
+
+        const std::wstring destination_candidate = JoinPathForDropTarget(destination_path, leaf_name);
+        if (GetFileAttributesW(destination_candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            if (conflict_name != nullptr) {
+                *conflict_name = leaf_name;
+            }
+            return true;
+        }
+    }
+
+    return false;
+}
+
+std::wstring ResolveDropLeafName(const std::wstring& candidate_name, UINT index) {
+    const wchar_t* leaf_ptr = PathFindFileNameW(candidate_name.c_str());
+    std::wstring leaf_name = (leaf_ptr != nullptr) ? std::wstring(leaf_ptr) : candidate_name;
+    if (leaf_name.empty()) {
+        wchar_t fallback_name[64] = {};
+        swprintf_s(fallback_name, L"dropped_item_%u.bin", index + 1U);
+        leaf_name = fallback_name;
+    }
+    return leaf_name;
+}
+
+bool WriteBufferToFile(const std::wstring& path, const BYTE* data, size_t bytes) {
+    HANDLE file_handle = CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file_handle == INVALID_HANDLE_VALUE) {
+        LogLastError(L"CreateFileW(DropWriteBuffer)");
+        return false;
+    }
+
+    bool write_ok = true;
+    size_t written_total = 0;
+    while (written_total < bytes) {
+        const size_t chunk = (std::min)(bytes - written_total, static_cast<size_t>(1U << 20));
+        DWORD written_now = 0;
+        if (!WriteFile(
+                file_handle,
+                data + written_total,
+                static_cast<DWORD>(chunk),
+                &written_now,
+                nullptr)) {
+            LogLastError(L"WriteFile(DropWriteBuffer)");
+            write_ok = false;
+            break;
+        }
+        if (written_now == 0U) {
+            write_ok = false;
+            break;
+        }
+        written_total += static_cast<size_t>(written_now);
+    }
+
+    CloseHandle(file_handle);
+    if (!write_ok || written_total != bytes) {
+        DeleteFileW(path.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool WriteIStreamToFile(IStream* stream, const std::wstring& path) {
+    if (stream == nullptr) {
+        return false;
+    }
+
+    LARGE_INTEGER origin = {};
+    (void)stream->Seek(origin, STREAM_SEEK_SET, nullptr);
+
+    HANDLE file_handle = CreateFileW(
+        path.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_NEW,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file_handle == INVALID_HANDLE_VALUE) {
+        LogLastError(L"CreateFileW(DropWriteIStream)");
+        return false;
+    }
+
+    bool write_ok = true;
+    constexpr ULONG kBufferBytes = 64U * 1024U;
+    std::vector<BYTE> buffer(kBufferBytes);
+    while (true) {
+        ULONG bytes_read = 0;
+        const HRESULT read_result = stream->Read(buffer.data(), kBufferBytes, &bytes_read);
+        if (FAILED(read_result)) {
+            LogHResult(L"IStream::Read(DropWriteIStream)", read_result);
+            write_ok = false;
+            break;
+        }
+        if (bytes_read == 0U) {
+            break;
+        }
+
+        DWORD bytes_written = 0;
+        if (!WriteFile(file_handle, buffer.data(), bytes_read, &bytes_written, nullptr) ||
+            bytes_written != bytes_read) {
+            LogLastError(L"WriteFile(DropWriteIStream)");
+            write_ok = false;
+            break;
+        }
+    }
+
+    CloseHandle(file_handle);
+    if (!write_ok) {
+        DeleteFileW(path.c_str());
+    }
+    return write_ok;
+}
+
+bool WriteHGlobalToFile(HGLOBAL global_handle, const std::wstring& path) {
+    if (global_handle == nullptr) {
+        return false;
+    }
+
+    const SIZE_T bytes = GlobalSize(global_handle);
+    const void* block = GlobalLock(global_handle);
+    if (block == nullptr && bytes > 0U) {
+        LogLastError(L"GlobalLock(DropWriteHGlobal)");
+        return false;
+    }
+
+    const bool write_ok = WriteBufferToFile(
+        path,
+        static_cast<const BYTE*>(block),
+        static_cast<size_t>(bytes));
+    if (block != nullptr) {
+        GlobalUnlock(global_handle);
+    }
+    return write_ok;
+}
+
+bool WriteIStorageToFile(IStorage* storage, const std::wstring& path) {
+    if (storage == nullptr) {
+        return false;
+    }
+
+    IStorage* destination_storage = nullptr;
+    const HRESULT create_result = StgCreateDocfile(
+        path.c_str(),
+        STGM_CREATE | STGM_READWRITE | STGM_SHARE_EXCLUSIVE | STGM_DIRECT,
+        0,
+        &destination_storage);
+    if (FAILED(create_result) || destination_storage == nullptr) {
+        LogHResult(L"StgCreateDocfile(DropWriteIStorage)", create_result);
+        return false;
+    }
+
+    const HRESULT copy_result = storage->CopyTo(0, nullptr, nullptr, destination_storage);
+    if (FAILED(copy_result)) {
+        LogHResult(L"IStorage::CopyTo(DropWriteIStorage)", copy_result);
+        destination_storage->Release();
+        DeleteFileW(path.c_str());
+        return false;
+    }
+
+    const HRESULT commit_result = destination_storage->Commit(STGC_DEFAULT);
+    destination_storage->Release();
+    if (FAILED(commit_result)) {
+        LogHResult(L"IStorage::Commit(DropWriteIStorage)", commit_result);
+        DeleteFileW(path.c_str());
+        return false;
+    }
+    return true;
+}
+
+bool WriteStgMediumToFile(const STGMEDIUM& medium, const std::wstring& path) {
+    switch (medium.tymed) {
+    case TYMED_ISTREAM:
+        return WriteIStreamToFile(medium.pstm, path);
+
+    case TYMED_HGLOBAL:
+        return WriteHGlobalToFile(medium.hGlobal, path);
+
+    case TYMED_FILE:
+        if (medium.lpszFileName == nullptr || medium.lpszFileName[0] == L'\0') {
+            return false;
+        }
+        if (CopyFileW(medium.lpszFileName, path.c_str(), TRUE)) {
+            return true;
+        }
+        LogLastError(L"CopyFileW(DropWriteTYMED_FILE)");
+        return false;
+
+    case TYMED_ISTORAGE:
+        return WriteIStorageToFile(medium.pstg, path);
+
+    default:
+        return false;
+    }
+}
+
+std::wstring TrimWhitespace(const std::wstring& value) {
+    const size_t begin = value.find_first_not_of(L" \t\r\n");
+    if (begin == std::wstring::npos) {
+        return std::wstring();
+    }
+    const size_t end = value.find_last_not_of(L" \t\r\n");
+    return value.substr(begin, (end - begin) + 1U);
+}
+
+void AppendExistingPathsFromTextBlock(const std::wstring& text, std::vector<std::wstring>* paths) {
+    if (paths == nullptr || text.empty()) {
+        return;
+    }
+
+    size_t start = 0;
+    while (start < text.size()) {
+        size_t end = text.find_first_of(L"\r\n", start);
+        if (end == std::wstring::npos) {
+            end = text.size();
+        }
+
+        std::wstring candidate = TrimWhitespace(text.substr(start, end - start));
+        if (candidate.size() >= 2U && candidate.front() == L'\"' && candidate.back() == L'\"') {
+            candidate = candidate.substr(1, candidate.size() - 2U);
+            candidate = TrimWhitespace(candidate);
+        }
+        if (!candidate.empty() && GetFileAttributesW(candidate.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            paths->push_back(candidate);
+        }
+
+        if (end == text.size()) {
+            break;
+        }
+        start = end + 1U;
+        while (start < text.size() && (text[start] == L'\r' || text[start] == L'\n')) {
+            ++start;
+        }
+    }
+}
+
+class FormatEtcEnumerator final : public IEnumFORMATETC {
+public:
+    explicit FormatEtcEnumerator(const std::vector<FORMATETC>& formats)
+        : ref_count_(1), index_(0) {
+        formats_.reserve(formats.size());
+        for (const FORMATETC& format : formats) {
+            formats_.push_back(CopyFormatEtc(format));
+        }
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (object == nullptr) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+        if (IsEqualIID(iid, IID_IUnknown) || IsEqualIID(iid, IID_IEnumFORMATETC)) {
+            *object = static_cast<IEnumFORMATETC*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return ++ref_count_;
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG count = --ref_count_;
+        if (count == 0U) {
+            delete this;
+        }
+        return count;
+    }
+
+    HRESULT STDMETHODCALLTYPE Next(ULONG celt, FORMATETC* elements, ULONG* fetched) override {
+        if (elements == nullptr) {
+            return E_POINTER;
+        }
+        if (fetched != nullptr) {
+            *fetched = 0;
+        }
+        if (celt == 0U) {
+            return S_OK;
+        }
+        if (fetched == nullptr && celt > 1U) {
+            return E_INVALIDARG;
+        }
+
+        ULONG copied = 0;
+        while (copied < celt && index_ < formats_.size()) {
+            elements[copied] = CopyFormatEtc(formats_[index_]);
+            ++copied;
+            ++index_;
+        }
+
+        if (fetched != nullptr) {
+            *fetched = copied;
+        }
+        return (copied == celt) ? S_OK : S_FALSE;
+    }
+
+    HRESULT STDMETHODCALLTYPE Skip(ULONG celt) override {
+        index_ = (std::min)(formats_.size(), index_ + static_cast<size_t>(celt));
+        return (index_ < formats_.size()) ? S_OK : S_FALSE;
+    }
+
+    HRESULT STDMETHODCALLTYPE Reset() override {
+        index_ = 0;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE Clone(IEnumFORMATETC** clone) override {
+        if (clone == nullptr) {
+            return E_POINTER;
+        }
+        *clone = nullptr;
+
+        auto* enumerator = new (std::nothrow) FormatEtcEnumerator(formats_);
+        if (enumerator == nullptr) {
+            return E_OUTOFMEMORY;
+        }
+        enumerator->index_ = index_;
+        *clone = enumerator;
+        return S_OK;
+    }
+
+private:
+    ~FormatEtcEnumerator() {
+        for (FORMATETC& format : formats_) {
+            if (format.ptd != nullptr) {
+                CoTaskMemFree(format.ptd);
+                format.ptd = nullptr;
+            }
+        }
+    }
+
+    std::atomic<ULONG> ref_count_;
+    std::vector<FORMATETC> formats_;
+    size_t index_;
+};
+
+class ExternalDragDataObject final : public IDataObject {
+public:
+    ExternalDragDataObject(HGLOBAL drop_files_handle, HGLOBAL drop_effect_handle)
+        : ref_count_(1) {
+        AddHGlobalFormat(CF_HDROP, drop_files_handle);
+
+        if (drop_effect_handle != nullptr) {
+            const UINT drop_effect_format = RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT);
+            if (drop_effect_format == 0U) {
+                LogLastError(L"RegisterClipboardFormatW(CFSTR_PREFERREDDROPEFFECT)");
+                GlobalFree(drop_effect_handle);
+            } else {
+                AddHGlobalFormat(static_cast<CLIPFORMAT>(drop_effect_format), drop_effect_handle);
+            }
+        }
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (object == nullptr) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+
+        if (IsEqualIID(iid, IID_IUnknown) || IsEqualIID(iid, IID_IDataObject)) {
+            *object = static_cast<IDataObject*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return ++ref_count_;
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG count = --ref_count_;
+        if (count == 0U) {
+            delete this;
+        }
+        return count;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetData(FORMATETC* format_etc_in, STGMEDIUM* medium) override {
+        if (format_etc_in == nullptr || medium == nullptr) {
+            return E_POINTER;
+        }
+
+        for (size_t i = 0; i < formats_.size(); ++i) {
+            const FORMATETC& stored_format = formats_[i];
+            if (format_etc_in->cfFormat != stored_format.cfFormat) {
+                continue;
+            }
+            if ((format_etc_in->tymed & stored_format.tymed) == 0) {
+                continue;
+            }
+            if (format_etc_in->dwAspect != stored_format.dwAspect) {
+                continue;
+            }
+            if (format_etc_in->lindex != -1 && format_etc_in->lindex != stored_format.lindex) {
+                continue;
+            }
+
+            if (stored_media_[i].tymed != TYMED_HGLOBAL || stored_media_[i].hGlobal == nullptr) {
+                return DV_E_TYMED;
+            }
+
+            HGLOBAL copy = DuplicateHGlobal(stored_media_[i].hGlobal);
+            if (copy == nullptr) {
+                return E_OUTOFMEMORY;
+            }
+
+            medium->tymed = TYMED_HGLOBAL;
+            medium->hGlobal = copy;
+            medium->pUnkForRelease = nullptr;
+            return S_OK;
+        }
+
+        return DV_E_FORMATETC;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetDataHere(FORMATETC* format_etc, STGMEDIUM* medium) override {
+        (void)format_etc;
+        (void)medium;
+        return DATA_E_FORMATETC;
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryGetData(FORMATETC* format_etc) override {
+        if (format_etc == nullptr) {
+            return E_POINTER;
+        }
+
+        for (const FORMATETC& stored_format : formats_) {
+            if (format_etc->cfFormat != stored_format.cfFormat) {
+                continue;
+            }
+            if ((format_etc->tymed & stored_format.tymed) == 0) {
+                continue;
+            }
+            if (format_etc->dwAspect != stored_format.dwAspect) {
+                continue;
+            }
+            if (format_etc->lindex != -1 && format_etc->lindex != stored_format.lindex) {
+                continue;
+            }
+            return S_OK;
+        }
+
+        return DV_E_FORMATETC;
+    }
+
+    HRESULT STDMETHODCALLTYPE GetCanonicalFormatEtc(FORMATETC* format_etc_in, FORMATETC* format_etc_out) override {
+        (void)format_etc_in;
+        if (format_etc_out == nullptr) {
+            return E_POINTER;
+        }
+        format_etc_out->ptd = nullptr;
+        return E_NOTIMPL;
+    }
+
+    HRESULT STDMETHODCALLTYPE SetData(FORMATETC* format_etc, STGMEDIUM* medium, BOOL release) override {
+        (void)format_etc;
+        (void)medium;
+        (void)release;
+        return E_NOTIMPL;
+    }
+
+    HRESULT STDMETHODCALLTYPE EnumFormatEtc(DWORD direction, IEnumFORMATETC** enum_format_etc) override {
+        if (enum_format_etc == nullptr) {
+            return E_POINTER;
+        }
+        *enum_format_etc = nullptr;
+
+        if (direction != DATADIR_GET) {
+            return E_NOTIMPL;
+        }
+
+        auto* enumerator = new (std::nothrow) FormatEtcEnumerator(formats_);
+        if (enumerator == nullptr) {
+            return E_OUTOFMEMORY;
+        }
+        *enum_format_etc = enumerator;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE DAdvise(
+        FORMATETC* format_etc,
+        DWORD advf,
+        IAdviseSink* advise_sink,
+        DWORD* connection) override {
+        (void)format_etc;
+        (void)advf;
+        (void)advise_sink;
+        (void)connection;
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
+
+    HRESULT STDMETHODCALLTYPE DUnadvise(DWORD connection) override {
+        (void)connection;
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
+
+    HRESULT STDMETHODCALLTYPE EnumDAdvise(IEnumSTATDATA** enum_advise) override {
+        (void)enum_advise;
+        return OLE_E_ADVISENOTSUPPORTED;
+    }
+
+private:
+    ~ExternalDragDataObject() {
+        for (STGMEDIUM& medium : stored_media_) {
+            ReleaseStgMedium(&medium);
+        }
+    }
+
+    void AddHGlobalFormat(CLIPFORMAT format, HGLOBAL global_handle) {
+        if (global_handle == nullptr) {
+            return;
+        }
+
+        FORMATETC format_etc = {};
+        format_etc.cfFormat = format;
+        format_etc.ptd = nullptr;
+        format_etc.dwAspect = DVASPECT_CONTENT;
+        format_etc.lindex = -1;
+        format_etc.tymed = TYMED_HGLOBAL;
+        formats_.push_back(format_etc);
+
+        STGMEDIUM medium = {};
+        medium.tymed = TYMED_HGLOBAL;
+        medium.hGlobal = global_handle;
+        medium.pUnkForRelease = nullptr;
+        stored_media_.push_back(medium);
+    }
+
+    std::atomic<ULONG> ref_count_;
+    std::vector<FORMATETC> formats_;
+    std::vector<STGMEDIUM> stored_media_;
+};
+
+class ExternalDragDropSource final : public IDropSource {
+public:
+    ExternalDragDropSource() : ref_count_(1) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (object == nullptr) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+
+        if (IsEqualIID(iid, IID_IUnknown) || IsEqualIID(iid, IID_IDropSource)) {
+            *object = static_cast<IDropSource*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return ++ref_count_;
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG count = --ref_count_;
+        if (count == 0U) {
+            delete this;
+        }
+        return count;
+    }
+
+    HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL escape_pressed, DWORD key_state) override {
+        if (escape_pressed != FALSE) {
+            return DRAGDROP_S_CANCEL;
+        }
+        if ((key_state & MK_LBUTTON) == 0) {
+            return DRAGDROP_S_DROP;
+        }
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD effect) override {
+        (void)effect;
+        return DRAGDROP_S_USEDEFAULTCURSORS;
+    }
+
+private:
+    ~ExternalDragDropSource() = default;
+
+    std::atomic<ULONG> ref_count_;
+};
+
 }  // namespace
 
 namespace fileexplorer {
 
+class FileListView::OleDropTarget final : public IDropTarget {
+public:
+    explicit OleDropTarget(FileListView* owner) : ref_count_(1), owner_(owner) {}
+
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid, void** object) override {
+        if (object == nullptr) {
+            return E_POINTER;
+        }
+        *object = nullptr;
+        if (IsEqualIID(iid, IID_IUnknown) || IsEqualIID(iid, IID_IDropTarget)) {
+            *object = static_cast<IDropTarget*>(this);
+            AddRef();
+            return S_OK;
+        }
+        return E_NOINTERFACE;
+    }
+
+    ULONG STDMETHODCALLTYPE AddRef() override {
+        return ++ref_count_;
+    }
+
+    ULONG STDMETHODCALLTYPE Release() override {
+        const ULONG count = --ref_count_;
+        if (count == 0U) {
+            delete this;
+        }
+        return count;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* data_object, DWORD key_state, POINTL point, DWORD* effect) override {
+        if (effect == nullptr) {
+            return E_INVALIDARG;
+        }
+        (void)point;
+        if (owner_ == nullptr || owner_->hwnd_ == nullptr || data_object == nullptr) {
+            current_data_acceptable_ = false;
+            *effect = DROPEFFECT_NONE;
+            return S_OK;
+        }
+
+        const DWORD desired_effect = owner_->ComputeDropEffectForDataObject(data_object, key_state);
+        const DWORD allowed_effects = (*effect) & (DROPEFFECT_COPY | DROPEFFECT_MOVE);
+        if ((desired_effect & allowed_effects) != 0U) {
+            current_data_acceptable_ = true;
+            *effect = desired_effect & allowed_effects;
+            return S_OK;
+        }
+        if ((allowed_effects & DROPEFFECT_COPY) != 0U && desired_effect != DROPEFFECT_NONE) {
+            current_data_acceptable_ = true;
+            *effect = DROPEFFECT_COPY;
+            return S_OK;
+        }
+        if ((allowed_effects & DROPEFFECT_MOVE) != 0U && desired_effect != DROPEFFECT_NONE) {
+            current_data_acceptable_ = true;
+            *effect = DROPEFFECT_MOVE;
+            return S_OK;
+        }
+        current_data_acceptable_ = false;
+        *effect = DROPEFFECT_NONE;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragOver(DWORD key_state, POINTL point, DWORD* effect) override {
+        if (effect == nullptr) {
+            return E_INVALIDARG;
+        }
+        (void)point;
+        if (owner_ == nullptr || owner_->hwnd_ == nullptr || !current_data_acceptable_) {
+            *effect = DROPEFFECT_NONE;
+            return S_OK;
+        }
+        if ((*effect & (DROPEFFECT_COPY | DROPEFFECT_MOVE)) == 0U) {
+            *effect = DROPEFFECT_NONE;
+            return S_OK;
+        }
+
+        DWORD desired_effect = DROPEFFECT_COPY;
+        if ((key_state & MK_SHIFT) != 0U && (key_state & MK_CONTROL) == 0U) {
+            desired_effect = DROPEFFECT_MOVE;
+        }
+        if ((*effect & desired_effect) != 0U) {
+            *effect = desired_effect;
+            return S_OK;
+        }
+        if ((*effect & DROPEFFECT_COPY) != 0U) {
+            *effect = DROPEFFECT_COPY;
+            return S_OK;
+        }
+        if ((*effect & DROPEFFECT_MOVE) != 0U) {
+            *effect = DROPEFFECT_MOVE;
+            return S_OK;
+        }
+        *effect = DROPEFFECT_NONE;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE DragLeave() override {
+        current_data_acceptable_ = false;
+        return S_OK;
+    }
+
+    HRESULT STDMETHODCALLTYPE Drop(IDataObject* data_object, DWORD key_state, POINTL point, DWORD* effect) override {
+        if (effect == nullptr) {
+            return E_INVALIDARG;
+        }
+        current_data_acceptable_ = false;
+        if (owner_ == nullptr || owner_->hwnd_ == nullptr || data_object == nullptr) {
+            *effect = DROPEFFECT_NONE;
+            return S_OK;
+        }
+
+        POINT client_point = {point.x, point.y};
+        ScreenToClient(owner_->hwnd_, &client_point);
+
+        DWORD performed_effect = DROPEFFECT_NONE;
+        if (!owner_->HandleOleDataObjectDrop(data_object, key_state, &client_point, &performed_effect)) {
+            *effect = DROPEFFECT_NONE;
+            return S_OK;
+        }
+
+        const DWORD allowed_effects = (*effect) & (DROPEFFECT_COPY | DROPEFFECT_MOVE);
+        *effect = performed_effect & allowed_effects;
+        if (*effect == DROPEFFECT_NONE && (allowed_effects & DROPEFFECT_COPY) != 0U) {
+            *effect = DROPEFFECT_COPY;
+        }
+        return S_OK;
+    }
+
+private:
+    ~OleDropTarget() = default;
+
+    std::atomic<ULONG> ref_count_;
+    FileListView* owner_;
+    bool current_data_acceptable_{false};
+};
+
 void FileListView::FontDeleter::operator()(HFONT font) const noexcept {
     if (font != nullptr) {
         DeleteObject(font);
+    }
+}
+
+void FileListView::ImageListDeleter::operator()(HIMAGELIST image_list) const noexcept {
+    if (image_list != nullptr) {
+        ImageList_Destroy(image_list);
     }
 }
 
@@ -332,6 +1329,7 @@ FileListView::FileListView() = default;
 FileListView::~FileListView() {
     EndInlineRenameControl();
     ClearShellContextMenu();
+    RevokeOleDropTarget();
     if (header_hwnd_ != nullptr) {
         RemoveWindowSubclass(header_hwnd_, &FileListView::HeaderEraseSubclassProc, kHeaderEraseSubclassId);
         header_hwnd_ = nullptr;
@@ -367,6 +1365,12 @@ HWND FileListView::hwnd() const noexcept {
 
 void FileListView::SetDpi(UINT dpi) {
     dpi_ = (dpi == 0U) ? 96U : dpi;
+    if (hwnd_ != nullptr && detail_row_height_image_list_ != nullptr) {
+        ListView_SetImageList(hwnd_, system_image_list_, LVSIL_SMALL);
+    }
+    detail_row_height_image_list_.reset();
+    detail_row_height_image_height_ = 0;
+    detail_row_height_icon_index_map_.clear();
     divider_font_.reset();
     divider_font_height_ = 0;
     list_font_.reset();
@@ -702,6 +1706,33 @@ bool FileListView::show_extensions() const noexcept {
     return show_extensions_;
 }
 
+void FileListView::SetDetailScalePercent(int detail_scale_percent) {
+    const int clamped = ClampDetailScalePercent(detail_scale_percent);
+    if (detail_scale_percent_ == clamped) {
+        return;
+    }
+
+    detail_scale_percent_ = clamped;
+    if (hwnd_ != nullptr && detail_row_height_image_list_ != nullptr) {
+        ListView_SetImageList(hwnd_, system_image_list_, LVSIL_SMALL);
+    }
+    detail_row_height_image_list_.reset();
+    detail_row_height_image_height_ = 0;
+    detail_row_height_icon_index_map_.clear();
+
+    list_font_.reset();
+    list_font_height_ = 0;
+    EnsureUiFonts();
+
+    if (hwnd_ != nullptr) {
+        InvalidateRect(hwnd_, nullptr, TRUE);
+    }
+}
+
+int FileListView::detail_scale_percent() const noexcept {
+    return detail_scale_percent_;
+}
+
 void FileListView::SetSortOrder(SortColumn sort_column, SortDirection sort_direction) {
     if (sort_column_ == sort_column && sort_direction_ == sort_direction) {
         return;
@@ -783,6 +1814,15 @@ bool FileListView::HandleNotify(LPARAM l_param, LRESULT* result) {
             *result = 0;
         }
         return true;
+
+    case LVN_BEGINDRAG:
+        if (HandleBeginDrag(reinterpret_cast<NMLISTVIEW*>(l_param))) {
+            if (result != nullptr) {
+                *result = 0;
+            }
+            return true;
+        }
+        break;
 
     case NM_CUSTOMDRAW:
         return HandleCustomDraw(reinterpret_cast<NMLVCUSTOMDRAW*>(l_param), result);
@@ -922,7 +1962,8 @@ LRESULT CALLBACK FileListView::HeaderEraseSubclassProc(
 
 bool FileListView::CreateListViewControl() {
     constexpr DWORD style =
-        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS;
+        WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT | LVS_OWNERDATA | LVS_SHOWSELALWAYS |
+        LVS_SHAREIMAGELISTS;
 
     hwnd_ = CreateWindowExW(
         0,
@@ -942,6 +1983,9 @@ bool FileListView::CreateListViewControl() {
         return false;
     }
 
+    DragAcceptFiles(hwnd_, TRUE);
+    (void)RegisterOleDropTarget();
+
     if (!SetWindowSubclass(hwnd_, &FileListView::ListViewSubclassProc, kListViewSubclassId, reinterpret_cast<DWORD_PTR>(this))) {
         LogLastError(L"SetWindowSubclass(FileListView)");
         return false;
@@ -958,6 +2002,44 @@ bool FileListView::CreateListViewControl() {
     ListView_SetTextBkColor(hwnd_, kListBackgroundColor);
     ListView_SetTextColor(hwnd_, kListTextColor);
     return true;
+}
+
+bool FileListView::RegisterOleDropTarget() {
+    if (hwnd_ == nullptr) {
+        return false;
+    }
+    if (ole_drop_target_ != nullptr) {
+        return true;
+    }
+
+    auto* drop_target = new (std::nothrow) OleDropTarget(this);
+    if (drop_target == nullptr) {
+        return false;
+    }
+
+    const HRESULT register_result = RegisterDragDrop(hwnd_, static_cast<IDropTarget*>(drop_target));
+    if (FAILED(register_result)) {
+        LogHResult(L"RegisterDragDrop(FileListView)", register_result);
+        drop_target->Release();
+        return false;
+    }
+
+    ole_drop_target_ = drop_target;
+    return true;
+}
+
+void FileListView::RevokeOleDropTarget() {
+    if (hwnd_ != nullptr) {
+        const HRESULT revoke_result = RevokeDragDrop(hwnd_);
+        if (FAILED(revoke_result) && revoke_result != DRAGDROP_E_NOTREGISTERED) {
+            LogHResult(L"RevokeDragDrop(FileListView)", revoke_result);
+        }
+    }
+
+    if (ole_drop_target_ != nullptr) {
+        ole_drop_target_->Release();
+        ole_drop_target_ = nullptr;
+    }
 }
 
 void FileListView::CreateColumns() {
@@ -1065,6 +2147,7 @@ void FileListView::EnsureSystemImageList() {
     }
 
     ListView_SetImageList(hwnd_, system_image_list_, LVSIL_SMALL);
+    ApplyDetailScaleToListMetrics();
 }
 
 void FileListView::EnsureDividerFont() {
@@ -1095,11 +2178,17 @@ void FileListView::EnsureDividerFont() {
 }
 
 void FileListView::EnsureUiFonts() {
-    const int desired_list_height = -MulDiv(9, static_cast<int>(dpi_), 72);
-    const int desired_header_height = desired_list_height;
+    int desired_list_height = -MulDiv(
+        kListBodyPointSize * detail_scale_percent_,
+        static_cast<int>(dpi_),
+        72 * 100);
+    if (desired_list_height == 0) {
+        desired_list_height = -1;
+    }
+    const int desired_header_height = -MulDiv(kListHeaderPointSize, static_cast<int>(dpi_), 72);
 
     if (list_font_ == nullptr || list_font_height_ != desired_list_height) {
-        list_font_.reset(CreateUiFont(9, dpi_, FW_NORMAL));
+        list_font_.reset(CreateUiFontFromPixelHeight(desired_list_height, FW_NORMAL));
         if (list_font_ == nullptr) {
             LogLastError(L"CreateFontW(FileListBody)");
             list_font_height_ = 0;
@@ -1109,7 +2198,7 @@ void FileListView::EnsureUiFonts() {
     }
 
     if (header_font_ == nullptr || header_font_height_ != desired_header_height) {
-        header_font_.reset(CreateUiFont(9, dpi_, FW_SEMIBOLD));
+        header_font_.reset(CreateUiFontFromPixelHeight(desired_header_height, FW_SEMIBOLD));
         if (header_font_ == nullptr) {
             LogLastError(L"CreateFontW(FileListHeader)");
             header_font_height_ = 0;
@@ -1126,9 +2215,71 @@ void FileListView::EnsureUiFonts() {
     if (header != nullptr && header_font_ != nullptr) {
         SendMessageW(header, WM_SETFONT, reinterpret_cast<WPARAM>(header_font_.get()), TRUE);
     }
+
+    ApplyDetailScaleToListMetrics();
 }
 
-bool FileListView::HandleGetDispInfo(NMLVDISPINFOW* info) const {
+void FileListView::ApplyDetailScaleToListMetrics() {
+    if (hwnd_ == nullptr || system_image_list_ == nullptr) {
+        return;
+    }
+
+    if (detail_scale_percent_ <= kDefaultDetailScalePercent) {
+        if (detail_row_height_image_list_ != nullptr) {
+            ListView_SetImageList(hwnd_, system_image_list_, LVSIL_SMALL);
+            detail_row_height_image_list_.reset();
+            detail_row_height_image_height_ = 0;
+            detail_row_height_icon_index_map_.clear();
+        }
+        return;
+    }
+
+    int icon_width = 0;
+    int icon_height = 16;
+    if (!ImageList_GetIconSize(system_image_list_, &icon_width, &icon_height)) {
+        icon_height = 16;
+        icon_width = 16;
+    }
+
+    const int base_text_height = MulDiv(kListBodyPointSize, static_cast<int>(dpi_), 72);
+    const int base_row_height = (std::max)(
+        icon_height,
+        base_text_height) + MulDiv(kListRowPaddingLogical, static_cast<int>(dpi_), 96);
+    const int desired_row_height = (std::max)(
+        base_row_height + 1,
+        MulDiv(base_row_height, detail_scale_percent_, 100));
+
+    if (detail_row_height_image_list_ != nullptr &&
+        detail_row_height_image_height_ == desired_row_height) {
+        ListView_SetImageList(hwnd_, detail_row_height_image_list_.get(), LVSIL_SMALL);
+        return;
+    }
+
+    if (detail_row_height_image_list_ != nullptr) {
+        detail_row_height_image_list_.reset();
+        detail_row_height_image_height_ = 0;
+        detail_row_height_icon_index_map_.clear();
+    }
+
+    const int cell_icon_width = (icon_width > 0) ? icon_width : 16;
+    UniqueImageList scaled_image_list(ImageList_Create(
+        cell_icon_width,
+        desired_row_height,
+        ILC_COLOR32 | ILC_MASK,
+        1,
+        1));
+    if (scaled_image_list == nullptr) {
+        LogLastError(L"ImageList_Create(ScaledSmallIconList)");
+        return;
+    }
+
+    ListView_SetImageList(hwnd_, scaled_image_list.get(), LVSIL_SMALL);
+    detail_row_height_image_list_ = std::move(scaled_image_list);
+    detail_row_height_image_height_ = desired_row_height;
+    detail_row_height_icon_index_map_.clear();
+}
+
+bool FileListView::HandleGetDispInfo(NMLVDISPINFOW* info) {
     if (info == nullptr || info->item.iItem < 0 || info->item.iItem >= static_cast<int>(display_entries_.size())) {
         return false;
     }
@@ -1164,7 +2315,7 @@ bool FileListView::HandleGetDispInfo(NMLVDISPINFOW* info) const {
     }
 
     if ((info->item.mask & LVIF_IMAGE) != 0) {
-        info->item.iImage = entry.is_group_divider ? -1 : entry.icon_index;
+        info->item.iImage = entry.is_group_divider ? -1 : ResolveScaledSmallIconIndex(entry.icon_index);
     }
 
     return true;
@@ -1417,6 +2568,34 @@ bool FileListView::HandleDoubleClick(const NMITEMACTIVATE* item_activate) {
     return OpenEntryAtIndex(item_activate->iItem, true);
 }
 
+bool FileListView::HandleBeginDrag(const NMLISTVIEW* list_view) {
+    if (list_view == nullptr || hwnd_ == nullptr) {
+        return false;
+    }
+
+    const int begin_index = list_view->iItem;
+    if (IsSelectableIndex(begin_index) &&
+        (ListView_GetItemState(hwnd_, begin_index, LVIS_SELECTED) & LVIS_SELECTED) == 0) {
+        EnsureSingleSelectionAtIndex(begin_index);
+    }
+
+    std::vector<int> selected_indices = CollectSelectedSelectableIndices();
+    if (selected_indices.empty() && IsSelectableIndex(begin_index)) {
+        selected_indices.push_back(begin_index);
+    }
+    if (selected_indices.empty()) {
+        return false;
+    }
+
+    const std::vector<std::wstring> selected_paths = CollectPathsForIndices(selected_indices);
+    if (selected_paths.empty()) {
+        return false;
+    }
+
+    EndInlineRenameControl();
+    return StartExternalDrag(selected_paths);
+}
+
 bool FileListView::HandleItemChanging(const NMLISTVIEW* list_view, LRESULT* result) const {
     if (list_view == nullptr || result == nullptr) {
         return false;
@@ -1666,11 +2845,77 @@ LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM
         LVHITTESTINFO hit = {};
         hit.pt = point;
         const int item = ListView_SubItemHitTest(hwnd_, &hit);
+        drag_candidate_active_ = false;
+        drag_candidate_index_ = -1;
+        drag_candidate_start_ = point;
+
+        if (IsSelectableIndex(item)) {
+            drag_candidate_active_ = true;
+            drag_candidate_index_ = item;
+        }
+
         if (item < 0) {
             ClearSelection();
             PostStatusUpdate();
         }
         break;
+    }
+
+    case WM_MOUSEMOVE: {
+        if (drag_candidate_active_ && (w_param & MK_LBUTTON) != 0U) {
+            const int delta_x = std::abs(GET_X_LPARAM(l_param) - drag_candidate_start_.x);
+            const int delta_y = std::abs(GET_Y_LPARAM(l_param) - drag_candidate_start_.y);
+            const int drag_width = (std::max)(1, GetSystemMetrics(SM_CXDRAG));
+            const int drag_height = (std::max)(1, GetSystemMetrics(SM_CYDRAG));
+            if (delta_x >= drag_width || delta_y >= drag_height) {
+                const int begin_index = drag_candidate_index_;
+                drag_candidate_active_ = false;
+                drag_candidate_index_ = -1;
+
+                if (IsSelectableIndex(begin_index) &&
+                    (ListView_GetItemState(hwnd_, begin_index, LVIS_SELECTED) & LVIS_SELECTED) == 0) {
+                    EnsureSingleSelectionAtIndex(begin_index);
+                }
+
+                std::vector<int> selected_indices = CollectSelectedSelectableIndices();
+                if (selected_indices.empty() && IsSelectableIndex(begin_index)) {
+                    selected_indices.push_back(begin_index);
+                }
+                const std::vector<std::wstring> selected_paths = CollectPathsForIndices(selected_indices);
+                if (!selected_paths.empty()) {
+                    EndInlineRenameControl();
+                    StartExternalDrag(selected_paths);
+                }
+
+                return 0;
+            }
+        } else if ((w_param & MK_LBUTTON) == 0U) {
+            drag_candidate_active_ = false;
+            drag_candidate_index_ = -1;
+        }
+        break;
+    }
+
+    case WM_LBUTTONUP:
+    case WM_CANCELMODE:
+    case WM_CAPTURECHANGED:
+        drag_candidate_active_ = false;
+        drag_candidate_index_ = -1;
+        break;
+
+    case WM_DROPFILES: {
+        HDROP drop_handle = reinterpret_cast<HDROP>(w_param);
+        POINT drop_point = {};
+        const bool has_client_point = DragQueryPoint(drop_handle, &drop_point) != FALSE;
+        const std::vector<std::wstring> source_paths = ExtractDropPathsFromHandle(drop_handle);
+        const bool shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+        const bool move_drop = shift_down && !ctrl_down;
+        DragFinish(drop_handle);
+
+        const POINT* point_ptr = has_client_point ? &drop_point : nullptr;
+        (void)HandleExternalPathsDrop(source_paths, move_drop, point_ptr);
+        return 0;
     }
 
     case WM_XBUTTONUP: {
@@ -1748,9 +2993,19 @@ LRESULT FileListView::HandleSubclassMessage(UINT message, WPARAM w_param, LPARAM
         break;
 
     case WM_NCDESTROY:
+        RevokeOleDropTarget();
+        DragAcceptFiles(hwnd_, FALSE);
+        drag_candidate_active_ = false;
+        drag_candidate_index_ = -1;
         EndInlineRenameControl();
         ClearShellContextMenu();
         SetLoadingState(false);
+        if (detail_row_height_image_list_ != nullptr) {
+            ListView_SetImageList(hwnd_, system_image_list_, LVSIL_SMALL);
+            detail_row_height_image_list_.reset();
+            detail_row_height_image_height_ = 0;
+            detail_row_height_icon_index_map_.clear();
+        }
         RemoveWindowSubclass(hwnd_, &FileListView::ListViewSubclassProc, kListViewSubclassId);
         break;
 
@@ -2446,6 +3701,372 @@ bool FileListView::OpenEntryAtIndex(int index, bool open_files_too) {
     return true;
 }
 
+bool FileListView::HandleExternalPathsDrop(
+    const std::vector<std::wstring>& source_paths,
+    bool move_drop,
+    const POINT* client_point) {
+    if (source_paths.empty() || search_mode_ || current_path_.empty()) {
+        return false;
+    }
+
+    std::wstring destination_path = current_path_;
+    if (client_point != nullptr && hwnd_ != nullptr) {
+        LVHITTESTINFO hit = {};
+        hit.pt = *client_point;
+        const int hit_index = ListView_SubItemHitTest(hwnd_, &hit);
+        if (IsSelectableIndex(hit_index) && display_entries_[hit_index].is_folder) {
+            destination_path = BuildFullPath(display_entries_[hit_index]);
+        }
+    }
+
+    std::wstring conflict_name;
+    if (TryFindDropNameConflict(source_paths, destination_path, &conflict_name)) {
+        std::wstring warning_message = L"Drop blocked: an item with the same name already exists in the destination folder.";
+        if (!conflict_name.empty()) {
+            warning_message = L"Drop blocked: \"";
+            warning_message.append(conflict_name);
+            warning_message.append(L"\" already exists in the destination folder.");
+        }
+        MessageBoxW(hwnd_, warning_message.c_str(), L"FileExplorer", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+
+    if (!FileOps::ImportPaths(hwnd_, source_paths, destination_path, move_drop)) {
+        return false;
+    }
+    RequestRefresh();
+    return true;
+}
+
+DWORD FileListView::ComputeDropEffectForDataObject(IDataObject* data_object, DWORD key_state) const {
+    if (data_object == nullptr || search_mode_ || current_path_.empty()) {
+        return DROPEFFECT_NONE;
+    }
+
+    std::vector<std::wstring> source_paths;
+    if (ExtractSourcePathsFromDataObject(data_object, &source_paths) && !source_paths.empty()) {
+        const bool shift_down = (key_state & MK_SHIFT) != 0U;
+        const bool ctrl_down = (key_state & MK_CONTROL) != 0U;
+        return (shift_down && !ctrl_down) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+    }
+
+    const UINT file_descriptor_format = RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW);
+    if (file_descriptor_format != 0U) {
+        FORMATETC descriptor_format = {};
+        descriptor_format.cfFormat = static_cast<CLIPFORMAT>(file_descriptor_format);
+        descriptor_format.ptd = nullptr;
+        descriptor_format.dwAspect = DVASPECT_CONTENT;
+        descriptor_format.lindex = -1;
+        descriptor_format.tymed = TYMED_HGLOBAL;
+        if (SUCCEEDED(data_object->QueryGetData(&descriptor_format))) {
+            return DROPEFFECT_COPY;
+        }
+    }
+    return DROPEFFECT_NONE;
+}
+
+bool FileListView::ExtractSourcePathsFromDataObject(IDataObject* data_object, std::vector<std::wstring>* source_paths) const {
+    if (data_object == nullptr || source_paths == nullptr) {
+        return false;
+    }
+    source_paths->clear();
+
+    FORMATETC drop_files_format = {};
+    drop_files_format.cfFormat = CF_HDROP;
+    drop_files_format.ptd = nullptr;
+    drop_files_format.dwAspect = DVASPECT_CONTENT;
+    drop_files_format.lindex = -1;
+    drop_files_format.tymed = TYMED_HGLOBAL;
+
+    STGMEDIUM medium = {};
+    if (SUCCEEDED(data_object->GetData(&drop_files_format, &medium))) {
+        if (medium.tymed == TYMED_HGLOBAL && medium.hGlobal != nullptr) {
+            *source_paths = ExtractDropPathsFromHandle(reinterpret_cast<HDROP>(medium.hGlobal));
+        }
+        ReleaseStgMedium(&medium);
+        if (!source_paths->empty()) {
+            return true;
+        }
+    }
+
+    const UINT shell_id_list_format = RegisterClipboardFormatW(CFSTR_SHELLIDLIST);
+    if (shell_id_list_format != 0U) {
+        FORMATETC pidl_format = {};
+        pidl_format.cfFormat = static_cast<CLIPFORMAT>(shell_id_list_format);
+        pidl_format.ptd = nullptr;
+        pidl_format.dwAspect = DVASPECT_CONTENT;
+        pidl_format.lindex = -1;
+        pidl_format.tymed = TYMED_HGLOBAL;
+
+        STGMEDIUM pidl_medium = {};
+        if (SUCCEEDED(data_object->GetData(&pidl_format, &pidl_medium))) {
+            if (pidl_medium.tymed == TYMED_HGLOBAL && pidl_medium.hGlobal != nullptr) {
+                const SIZE_T bytes = GlobalSize(pidl_medium.hGlobal);
+                const BYTE* block = static_cast<const BYTE*>(GlobalLock(pidl_medium.hGlobal));
+                if (block != nullptr && bytes >= sizeof(UINT) * 2U) {
+                    const CIDA* cida = reinterpret_cast<const CIDA*>(block);
+                    const size_t offset_count = static_cast<size_t>(cida->cidl) + 1U;
+                    const size_t min_bytes = sizeof(UINT) + (offset_count * sizeof(UINT));
+                    if (offset_count >= 1U && min_bytes <= bytes) {
+                        bool offsets_valid = true;
+                        for (size_t offset_index = 0; offset_index < offset_count; ++offset_index) {
+                            if (cida->aoffset[offset_index] >= bytes) {
+                                offsets_valid = false;
+                                break;
+                            }
+                        }
+
+                        if (offsets_valid) {
+                            const PCIDLIST_ABSOLUTE parent_pidl = reinterpret_cast<PCIDLIST_ABSOLUTE>(block + cida->aoffset[0]);
+                            for (UINT i = 0; i < cida->cidl; ++i) {
+                                const PCUIDLIST_RELATIVE child_pidl =
+                                    reinterpret_cast<PCUIDLIST_RELATIVE>(block + cida->aoffset[i + 1U]);
+                                PIDLIST_ABSOLUTE absolute_pidl = ILCombine(parent_pidl, child_pidl);
+                                if (absolute_pidl == nullptr) {
+                                    continue;
+                                }
+                                wchar_t path_buffer[MAX_PATH] = {};
+                                if (SHGetPathFromIDListW(absolute_pidl, path_buffer) && path_buffer[0] != L'\0') {
+                                    source_paths->push_back(path_buffer);
+                                }
+                                CoTaskMemFree(absolute_pidl);
+                            }
+                        }
+                    }
+                }
+                if (block != nullptr) {
+                    GlobalUnlock(pidl_medium.hGlobal);
+                }
+            }
+            ReleaseStgMedium(&pidl_medium);
+            if (!source_paths->empty()) {
+                return true;
+            }
+        }
+    }
+
+    const UINT file_name_w_format = RegisterClipboardFormatW(CFSTR_FILENAMEW);
+    if (file_name_w_format != 0U) {
+        FORMATETC file_name_format = {};
+        file_name_format.cfFormat = static_cast<CLIPFORMAT>(file_name_w_format);
+        file_name_format.ptd = nullptr;
+        file_name_format.dwAspect = DVASPECT_CONTENT;
+        file_name_format.lindex = -1;
+        file_name_format.tymed = TYMED_HGLOBAL;
+
+        STGMEDIUM file_name_medium = {};
+        if (SUCCEEDED(data_object->GetData(&file_name_format, &file_name_medium))) {
+            if (file_name_medium.tymed == TYMED_HGLOBAL && file_name_medium.hGlobal != nullptr) {
+                const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(file_name_medium.hGlobal));
+                if (text != nullptr) {
+                    AppendExistingPathsFromTextBlock(text, source_paths);
+                    GlobalUnlock(file_name_medium.hGlobal);
+                }
+            }
+            ReleaseStgMedium(&file_name_medium);
+            if (!source_paths->empty()) {
+                return true;
+            }
+        }
+    }
+
+    FORMATETC unicode_text_format = {};
+    unicode_text_format.cfFormat = CF_UNICODETEXT;
+    unicode_text_format.ptd = nullptr;
+    unicode_text_format.dwAspect = DVASPECT_CONTENT;
+    unicode_text_format.lindex = -1;
+    unicode_text_format.tymed = TYMED_HGLOBAL;
+
+    STGMEDIUM text_medium = {};
+    if (SUCCEEDED(data_object->GetData(&unicode_text_format, &text_medium))) {
+        if (text_medium.tymed == TYMED_HGLOBAL && text_medium.hGlobal != nullptr) {
+            const wchar_t* text = static_cast<const wchar_t*>(GlobalLock(text_medium.hGlobal));
+            if (text != nullptr) {
+                AppendExistingPathsFromTextBlock(text, source_paths);
+                GlobalUnlock(text_medium.hGlobal);
+            }
+        }
+        ReleaseStgMedium(&text_medium);
+        if (!source_paths->empty()) {
+            return true;
+        }
+    }
+
+    return !source_paths->empty();
+}
+
+bool FileListView::ImportVirtualFilesFromDataObject(IDataObject* data_object, const std::wstring& destination_path) {
+    if (data_object == nullptr || destination_path.empty()) {
+        return false;
+    }
+
+    const UINT descriptor_format_w = RegisterClipboardFormatW(CFSTR_FILEDESCRIPTORW);
+    if (descriptor_format_w == 0U) {
+        return false;
+    }
+
+    FORMATETC descriptor_format = {};
+    descriptor_format.cfFormat = static_cast<CLIPFORMAT>(descriptor_format_w);
+    descriptor_format.ptd = nullptr;
+    descriptor_format.dwAspect = DVASPECT_CONTENT;
+    descriptor_format.lindex = -1;
+    descriptor_format.tymed = TYMED_HGLOBAL;
+
+    STGMEDIUM descriptor_medium = {};
+    if (FAILED(data_object->GetData(&descriptor_format, &descriptor_medium))) {
+        return false;
+    }
+    if (descriptor_medium.tymed != TYMED_HGLOBAL || descriptor_medium.hGlobal == nullptr) {
+        ReleaseStgMedium(&descriptor_medium);
+        return false;
+    }
+
+    struct VirtualDescriptorItem {
+        std::wstring leaf_name;
+        DWORD flags = 0;
+        DWORD attributes = 0;
+    };
+    std::vector<VirtualDescriptorItem> items;
+    std::vector<std::wstring> source_name_checks;
+
+    const SIZE_T descriptor_bytes = GlobalSize(descriptor_medium.hGlobal);
+    const FILEGROUPDESCRIPTORW* group =
+        static_cast<const FILEGROUPDESCRIPTORW*>(GlobalLock(descriptor_medium.hGlobal));
+    if (group == nullptr) {
+        ReleaseStgMedium(&descriptor_medium);
+        return false;
+    }
+
+    const size_t max_items = (descriptor_bytes > sizeof(UINT))
+        ? (descriptor_bytes - sizeof(UINT)) / sizeof(FILEDESCRIPTORW)
+        : 0U;
+    const size_t item_count = (std::min)(static_cast<size_t>(group->cItems), max_items);
+    items.reserve(item_count);
+    source_name_checks.reserve(item_count);
+
+    for (size_t i = 0; i < item_count; ++i) {
+        const FILEDESCRIPTORW& descriptor = group->fgd[i];
+        VirtualDescriptorItem item = {};
+        item.leaf_name = ResolveDropLeafName(descriptor.cFileName, static_cast<UINT>(i));
+        item.flags = descriptor.dwFlags;
+        item.attributes = descriptor.dwFileAttributes;
+        items.push_back(item);
+        source_name_checks.push_back(item.leaf_name);
+    }
+
+    GlobalUnlock(descriptor_medium.hGlobal);
+    ReleaseStgMedium(&descriptor_medium);
+    if (items.empty()) {
+        return false;
+    }
+
+    std::wstring conflict_name;
+    if (TryFindDropNameConflict(source_name_checks, destination_path, &conflict_name)) {
+        std::wstring warning_message = L"Drop blocked: an item with the same name already exists in the destination folder.";
+        if (!conflict_name.empty()) {
+            warning_message = L"Drop blocked: \"";
+            warning_message.append(conflict_name);
+            warning_message.append(L"\" already exists in the destination folder.");
+        }
+        MessageBoxW(hwnd_, warning_message.c_str(), L"FileExplorer", MB_OK | MB_ICONWARNING);
+        return false;
+    }
+
+    const UINT contents_format = RegisterClipboardFormatW(CFSTR_FILECONTENTS);
+    if (contents_format == 0U) {
+        return false;
+    }
+
+    bool imported_any = false;
+    for (size_t index = 0; index < items.size(); ++index) {
+        const VirtualDescriptorItem& item = items[index];
+        const std::wstring target_path = JoinPathForDropTarget(destination_path, item.leaf_name);
+
+        const bool is_directory =
+            (item.flags & FD_ATTRIBUTES) != 0U &&
+            (item.attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U;
+        if (is_directory) {
+            if (!CreateDirectoryW(target_path.c_str(), nullptr)) {
+                const DWORD create_error = GetLastError();
+                if (create_error != ERROR_ALREADY_EXISTS) {
+                    LogLastError(L"CreateDirectoryW(DropVirtualDirectory)");
+                    return false;
+                }
+            }
+            imported_any = true;
+            continue;
+        }
+
+        FORMATETC contents_request = {};
+        contents_request.cfFormat = static_cast<CLIPFORMAT>(contents_format);
+        contents_request.ptd = nullptr;
+        contents_request.dwAspect = DVASPECT_CONTENT;
+        contents_request.lindex = static_cast<LONG>(index);
+        contents_request.tymed = TYMED_ISTREAM | TYMED_HGLOBAL | TYMED_FILE | TYMED_ISTORAGE;
+
+        STGMEDIUM contents_medium = {};
+        const HRESULT get_contents_result = data_object->GetData(&contents_request, &contents_medium);
+        if (FAILED(get_contents_result)) {
+            LogHResult(L"IDataObject::GetData(CFSTR_FILECONTENTS)", get_contents_result);
+            return false;
+        }
+
+        const bool write_ok = WriteStgMediumToFile(contents_medium, target_path);
+        ReleaseStgMedium(&contents_medium);
+        if (!write_ok) {
+            return false;
+        }
+
+        imported_any = true;
+    }
+
+    if (imported_any) {
+        RequestRefresh();
+    }
+    return imported_any;
+}
+
+bool FileListView::HandleOleDataObjectDrop(
+    IDataObject* data_object,
+    DWORD key_state,
+    const POINT* client_point,
+    DWORD* performed_effect) {
+    if (performed_effect != nullptr) {
+        *performed_effect = DROPEFFECT_NONE;
+    }
+    if (data_object == nullptr || search_mode_ || current_path_.empty()) {
+        return false;
+    }
+
+    std::wstring destination_path = current_path_;
+    if (client_point != nullptr && hwnd_ != nullptr) {
+        LVHITTESTINFO hit = {};
+        hit.pt = *client_point;
+        const int hit_index = ListView_SubItemHitTest(hwnd_, &hit);
+        if (IsSelectableIndex(hit_index) && display_entries_[hit_index].is_folder) {
+            destination_path = BuildFullPath(display_entries_[hit_index]);
+        }
+    }
+
+    std::vector<std::wstring> source_paths;
+    if (ExtractSourcePathsFromDataObject(data_object, &source_paths) && !source_paths.empty()) {
+        const bool shift_down = (key_state & MK_SHIFT) != 0U;
+        const bool ctrl_down = (key_state & MK_CONTROL) != 0U;
+        const bool move_drop = shift_down && !ctrl_down;
+        const bool imported = HandleExternalPathsDrop(source_paths, move_drop, client_point);
+        if (imported && performed_effect != nullptr) {
+            *performed_effect = move_drop ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+        }
+        return imported;
+    }
+
+    const bool imported_virtual = ImportVirtualFilesFromDataObject(data_object, destination_path);
+    if (imported_virtual && performed_effect != nullptr) {
+        *performed_effect = DROPEFFECT_COPY;
+    }
+    return imported_virtual;
+}
+
 void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
     EndInlineRenameControl();
     ClearShellContextMenu();
@@ -2482,6 +4103,9 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
         MF_STRING | (show_extensions_ ? MF_CHECKED : MF_UNCHECKED),
         kMenuToggleShowExtensions,
         L"Show file extensions");
+    AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(menu, MF_STRING, kMenuIncreaseDetailScale, L"Increase detail font + row spacing (+5%)");
+    AppendMenuW(menu, MF_STRING, kMenuResetDetailScale, L"Default detail font + row spacing");
 
     const int target_index = ResolveContextTargetIndex(hit_index);
     const bool has_target = IsSelectableIndex(target_index);
@@ -2519,10 +4143,22 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
         EnableMenuItem(menu, kMenuPaste, MF_BYCOMMAND | MF_GRAYED);
     }
 
+    if (detail_scale_percent_ >= kDetailScaleMaxPercent) {
+        EnableMenuItem(menu, kMenuIncreaseDetailScale, MF_BYCOMMAND | MF_GRAYED);
+    }
+    if (detail_scale_percent_ <= kDefaultDetailScalePercent) {
+        EnableMenuItem(menu, kMenuResetDetailScale, MF_BYCOMMAND | MF_GRAYED);
+    }
+
     if (has_target && !display_entries_[target_index].is_folder) {
         const UINT disable_flags = MF_BYCOMMAND | MF_GRAYED;
         EnableMenuItem(menu, kMenuMakeFavourite, disable_flags);
         EnableMenuItem(menu, kMenuMakeFlyoutFavourite, disable_flags);
+    }
+
+    if (has_target) {
+        const FileEntry& entry = display_entries_[target_index];
+        (void)AppendSevenZipContextMenu(menu, BuildFullPath(entry));
     }
 
     const UINT command = static_cast<UINT>(TrackPopupMenuEx(
@@ -2624,6 +4260,7 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
                 break;
 
             default:
+                (void)InvokeShellContextMenu(command);
                 break;
             }
         }
@@ -2648,6 +4285,20 @@ void FileListView::ShowContextMenu(POINT screen_point, int hit_index) {
             if (parent_hwnd_ != nullptr &&
                 !PostMessageW(parent_hwnd_, WM_FE_FILELIST_TOGGLE_SHOW_EXTENSIONS, 0, 0)) {
                 LogLastError(L"PostMessageW(WM_FE_FILELIST_TOGGLE_SHOW_EXTENSIONS)");
+            }
+            break;
+
+        case kMenuIncreaseDetailScale:
+            if (parent_hwnd_ != nullptr &&
+                !PostMessageW(parent_hwnd_, WM_FE_FILELIST_INCREASE_DETAIL_SCALE, 0, 0)) {
+                LogLastError(L"PostMessageW(WM_FE_FILELIST_INCREASE_DETAIL_SCALE)");
+            }
+            break;
+
+        case kMenuResetDetailScale:
+            if (parent_hwnd_ != nullptr &&
+                !PostMessageW(parent_hwnd_, WM_FE_FILELIST_RESET_DETAIL_SCALE, 0, 0)) {
+                LogLastError(L"PostMessageW(WM_FE_FILELIST_RESET_DETAIL_SCALE)");
             }
             break;
 
@@ -2718,6 +4369,60 @@ std::vector<std::wstring> FileListView::CollectPathsForIndices(const std::vector
         paths.push_back(BuildFullPath(display_entries_[index]));
     }
     return paths;
+}
+
+bool FileListView::StartExternalDrag(const std::vector<std::wstring>& paths) {
+    if (paths.empty()) {
+        return false;
+    }
+
+    const bool shift_down = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+    const bool ctrl_down = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+    const DWORD preferred_effect =
+        (shift_down && !ctrl_down) ? DROPEFFECT_MOVE : DROPEFFECT_COPY;
+    constexpr DWORD allowed_effects = DROPEFFECT_COPY | DROPEFFECT_MOVE;
+
+    HGLOBAL drop_files_handle = CreateDropFilesHandle(paths);
+    if (drop_files_handle == nullptr) {
+        return false;
+    }
+
+    HGLOBAL drop_effect_handle = CreateDropEffectHandle(preferred_effect);
+    auto* data_object = new (std::nothrow) ExternalDragDataObject(drop_files_handle, drop_effect_handle);
+    if (data_object == nullptr) {
+        GlobalFree(drop_files_handle);
+        if (drop_effect_handle != nullptr) {
+            GlobalFree(drop_effect_handle);
+        }
+        return false;
+    }
+
+    auto* drop_source = new (std::nothrow) ExternalDragDropSource();
+    if (drop_source == nullptr) {
+        data_object->Release();
+        return false;
+    }
+
+    DWORD performed_effect = DROPEFFECT_NONE;
+    const HRESULT drag_result = DoDragDrop(
+        static_cast<IDataObject*>(data_object),
+        static_cast<IDropSource*>(drop_source),
+        allowed_effects,
+        &performed_effect);
+    (void)performed_effect;
+    if (FAILED(drag_result)) {
+        wchar_t buffer[256] = {};
+        swprintf_s(
+            buffer,
+            L"[FileExplorer] DoDragDrop failed (HRESULT=0x%08lX).\r\n",
+            static_cast<unsigned long>(drag_result));
+        OutputDebugStringW(buffer);
+    }
+
+    drop_source->Release();
+    data_object->Release();
+
+    return drag_result == DRAGDROP_S_DROP || drag_result == DRAGDROP_S_CANCEL;
 }
 
 void FileListView::EnsureSingleSelectionAtIndex(int index) {
@@ -2791,6 +4496,7 @@ bool FileListView::DeleteSelection(bool permanent, int fallback_index) {
     if (indices.empty()) {
         return false;
     }
+    const int top_deleted_index = indices.front();
 
     const std::vector<std::wstring> paths = CollectPathsForIndices(indices);
     if (paths.empty()) {
@@ -2836,7 +4542,28 @@ bool FileListView::DeleteSelection(bool permanent, int fallback_index) {
     SortBaseEntries();
     BuildDisplayEntriesWithGroups();
     UpdateSortIndicators();
-    UpdateItemCountAndRefresh(true);
+    UpdateItemCountAndRefresh(false);
+
+    int focus_index = -1;
+    if (!display_entries_.empty()) {
+        int anchor_index = top_deleted_index - 1;
+        if (anchor_index >= static_cast<int>(display_entries_.size())) {
+            anchor_index = static_cast<int>(display_entries_.size()) - 1;
+        }
+
+        focus_index = FindNextSelectableIndex(anchor_index + 1, -1);
+        if (focus_index < 0) {
+            const int downward_start = (anchor_index < 0) ? -1 : (anchor_index - 1);
+            focus_index = FindNextSelectableIndex(downward_start, 1);
+        }
+    }
+
+    if (focus_index >= 0) {
+        EnsureSingleSelectionAtIndex(focus_index);
+    } else {
+        ClearSelection();
+    }
+
     PostStatusUpdate();
 
     if (!search_mode_) {
@@ -3266,6 +4993,101 @@ bool FileListView::IsPathCutPending(const std::wstring& full_path) const {
     return cut_pending_paths_.find(key) != cut_pending_paths_.end();
 }
 
+bool FileListView::AppendSevenZipContextMenu(HMENU menu, const std::wstring& path) {
+    if (menu == nullptr || path.empty()) {
+        return false;
+    }
+
+    HMENU shell_menu = CreatePopupMenu();
+    if (shell_menu == nullptr) {
+        LogLastError(L"CreatePopupMenu(AppendSevenZipContextMenu)");
+        return false;
+    }
+
+    if (!AppendShellContextMenu(shell_menu, path, kShellMenuCommandFirst, kShellMenuCommandLast)) {
+        DestroyMenu(shell_menu);
+        return false;
+    }
+
+    const int shell_item_count = GetMenuItemCount(shell_menu);
+    if (shell_item_count <= 0) {
+        DestroyMenu(shell_menu);
+        ClearShellContextMenu();
+        return false;
+    }
+
+    int seven_zip_index = -1;
+    HMENU seven_zip_submenu = nullptr;
+    UINT seven_zip_command_id = 0;
+    std::wstring seven_zip_label;
+
+    for (int index = 0; index < shell_item_count; ++index) {
+        std::wstring menu_label;
+        if (!TryGetMenuItemTextByPosition(shell_menu, static_cast<UINT>(index), &menu_label)) {
+            continue;
+        }
+        if (!IsSevenZipMenuLabel(menu_label)) {
+            continue;
+        }
+
+        MENUITEMINFOW item_info = {};
+        item_info.cbSize = sizeof(item_info);
+        item_info.fMask = MIIM_ID | MIIM_SUBMENU;
+        if (!GetMenuItemInfoW(shell_menu, static_cast<UINT>(index), TRUE, &item_info)) {
+            continue;
+        }
+
+        seven_zip_index = index;
+        seven_zip_submenu = item_info.hSubMenu;
+        seven_zip_command_id = item_info.wID;
+        seven_zip_label = std::move(menu_label);
+        break;
+    }
+
+    if (seven_zip_index < 0) {
+        DestroyMenu(shell_menu);
+        ClearShellContextMenu();
+        return false;
+    }
+
+    if (!RemoveMenu(shell_menu, static_cast<UINT>(seven_zip_index), MF_BYPOSITION)) {
+        LogLastError(L"RemoveMenu(AppendSevenZipContextMenu)");
+        DestroyMenu(shell_menu);
+        ClearShellContextMenu();
+        return false;
+    }
+
+    if (GetMenuItemCount(menu) > 0) {
+        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
+    }
+
+    const std::wstring visible_label = seven_zip_label.empty() ? std::wstring(L"7-Zip") : seven_zip_label;
+    bool appended = false;
+    if (seven_zip_submenu != nullptr) {
+        appended = AppendMenuW(
+            menu,
+            MF_POPUP | MF_STRING,
+            reinterpret_cast<UINT_PTR>(seven_zip_submenu),
+            visible_label.c_str()) != FALSE;
+    } else if (seven_zip_command_id != 0U) {
+        appended = AppendMenuW(
+            menu,
+            MF_STRING,
+            static_cast<UINT_PTR>(seven_zip_command_id),
+            visible_label.c_str()) != FALSE;
+    }
+
+    DestroyMenu(shell_menu);
+    if (!appended) {
+        if (seven_zip_submenu != nullptr) {
+            DestroyMenu(seven_zip_submenu);
+        }
+        ClearShellContextMenu();
+        return false;
+    }
+    return true;
+}
+
 bool FileListView::AppendShellContextMenu(HMENU menu, const std::wstring& path, UINT first_id, UINT last_id) {
     if (menu == nullptr || path.empty()) {
         return false;
@@ -3348,6 +5170,96 @@ void FileListView::ClearShellContextMenu() {
     }
     shell_context_menu_first_id_ = 0;
     shell_context_menu_last_id_ = 0;
+}
+
+int FileListView::ResolveScaledSmallIconIndex(int system_icon_index) {
+    if (system_icon_index < 0) {
+        return -1;
+    }
+
+    if (detail_row_height_image_list_ == nullptr || detail_scale_percent_ <= kDefaultDetailScalePercent) {
+        return system_icon_index;
+    }
+    if (system_image_list_ == nullptr) {
+        return system_icon_index;
+    }
+
+    const auto it = detail_row_height_icon_index_map_.find(system_icon_index);
+    if (it != detail_row_height_icon_index_map_.end()) {
+        return it->second;
+    }
+
+    int target_width = 16;
+    int target_height = (detail_row_height_image_height_ > 0) ? detail_row_height_image_height_ : 16;
+    if (!ImageList_GetIconSize(detail_row_height_image_list_.get(), &target_width, &target_height)) {
+        target_width = 16;
+        target_height = (detail_row_height_image_height_ > 0) ? detail_row_height_image_height_ : 16;
+    }
+
+    int source_width = 16;
+    int source_height = 16;
+    if (!ImageList_GetIconSize(system_image_list_, &source_width, &source_height)) {
+        source_width = 16;
+        source_height = 16;
+    }
+
+    HBITMAP composed_bitmap = CreateTransparentDibBitmap(target_width, target_height);
+    if (composed_bitmap == nullptr) {
+        LogLastError(L"CreateTransparentDibBitmap(ScaledSmallIconList)");
+        return -1;
+    }
+
+    HDC memory_dc = CreateCompatibleDC(nullptr);
+    if (memory_dc == nullptr) {
+        LogLastError(L"CreateCompatibleDC(ScaledSmallIconList)");
+        DeleteObject(composed_bitmap);
+        return -1;
+    }
+
+    HGDIOBJ old_bitmap = SelectObject(memory_dc, composed_bitmap);
+    if (old_bitmap == HGDI_ERROR) {
+        LogLastError(L"SelectObject(ScaledSmallIconList)");
+        DeleteDC(memory_dc);
+        DeleteObject(composed_bitmap);
+        return -1;
+    }
+
+    HICON icon = ImageList_GetIcon(system_image_list_, system_icon_index, ILD_NORMAL);
+    if (icon == nullptr) {
+        SelectObject(memory_dc, old_bitmap);
+        DeleteDC(memory_dc);
+        DeleteObject(composed_bitmap);
+        return -1;
+    }
+
+    const int draw_x = (std::max)(0, (target_width - source_width) / 2);
+    const int draw_y = (std::max)(0, (target_height - source_height) / 2);
+    if (!DrawIconEx(
+            memory_dc,
+            draw_x,
+            draw_y,
+            icon,
+            source_width,
+            source_height,
+            0,
+            nullptr,
+            DI_NORMAL)) {
+        LogLastError(L"DrawIconEx(ScaledSmallIconList)");
+    }
+    DestroyIcon(icon);
+
+    SelectObject(memory_dc, old_bitmap);
+    DeleteDC(memory_dc);
+
+    const int scaled_index = ImageList_Add(detail_row_height_image_list_.get(), composed_bitmap, nullptr);
+    DeleteObject(composed_bitmap);
+    if (scaled_index < 0) {
+        LogLastError(L"ImageList_Add(ScaledSmallIconList)");
+        return -1;
+    }
+
+    detail_row_height_icon_index_map_.insert_or_assign(system_icon_index, scaled_index);
+    return scaled_index;
 }
 
 std::wstring FileListView::BuildDisplayName(const FileEntry& entry) const {
@@ -3680,6 +5592,10 @@ int FileListView::ClampColumnWidthLogical(int column_index, int value) noexcept 
         min_width = 120;
     }
     return (std::max)(min_width, (std::min)(kMaxColumnWidthLogical, value));
+}
+
+int FileListView::ClampDetailScalePercent(int value) noexcept {
+    return (std::max)(kDetailScaleMinPercent, (std::min)(kDetailScaleMaxPercent, value));
 }
 
 FileListView::DateBucket FileListView::BucketForFileTime(const FILETIME& file_time) {

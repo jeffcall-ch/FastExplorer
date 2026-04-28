@@ -341,15 +341,15 @@ int App::Run(HINSTANCE instance, int show_command, const wchar_t* command_line) 
         LogLastError(L"InitCommonControlsEx");
     }
 
-    const HRESULT com_result = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
-    if (FAILED(com_result) && com_result != RPC_E_CHANGED_MODE) {
-        LogHResult(L"CoInitializeEx", com_result);
+    const HRESULT ole_result = OleInitialize(nullptr);
+    if (FAILED(ole_result) && ole_result != RPC_E_CHANGED_MODE) {
+        LogHResult(L"OleInitialize", ole_result);
     }
 
     MainWindow main_window;
     if (!main_window.Create(instance, show_command)) {
-        if (SUCCEEDED(com_result)) {
-            CoUninitialize();
+        if (SUCCEEDED(ole_result)) {
+            OleUninitialize();
         }
         return -1;
     }
@@ -364,8 +364,8 @@ int App::Run(HINSTANCE instance, int show_command, const wchar_t* command_line) 
         pipe_server_thread.join();
     }
 
-    if (SUCCEEDED(com_result)) {
-        CoUninitialize();
+    if (SUCCEEDED(ole_result)) {
+        OleUninitialize();
     }
     return exit_code;
 }

@@ -1,0 +1,22 @@
+﻿FileExplorer Revision Notes
+===========================
+
+Version: 1.0.3.0
+Date: 2026-04-23
+Type: Portable feature update
+
+Updates in this revision:
+- Added outbound drag-and-drop from detail pane selections.
+- You can now drag selected files/folders from FileExplorer directly into external targets,
+  including browser upload drop zones and compatible apps.
+- Keeps prior v1.0.2 improvements:
+  - detail-pane +5% font/row scaling and reset to default
+  - Date Modified sort mixes folders/files by timestamp.
+
+Deployment naming policy:
+- Executable deployment filename includes version by default in this package:
+  - FileExplorer_v1.0.3.exe
+
+Packaging notes:
+- Portable folder contains only runtime essentials.
+- Data/config files are generated on first launch in the same folder.

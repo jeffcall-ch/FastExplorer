@@ -16,6 +16,11 @@ public:
     static bool CopyPathsToClipboard(HWND owner, const std::vector<std::wstring>& paths, bool cut);
     static bool ClipboardHasDropFiles();
     static bool PasteFromClipboard(HWND owner, const std::wstring& destination_folder, bool* was_move);
+    static bool ImportPaths(
+        HWND owner,
+        const std::vector<std::wstring>& source_paths,
+        const std::wstring& destination_folder,
+        bool move);
 
     static bool DeleteToRecycleBin(HWND owner, const std::vector<std::wstring>& paths);
     static bool DeletePermanently(HWND owner, const std::vector<std::wstring>& paths);

@@ -20,6 +20,7 @@ constexpr wchar_t kShowHiddenFilesKey[] = L"ShowHiddenFiles";
 constexpr wchar_t kShowExtensionsKey[] = L"ShowExtensions";
 constexpr wchar_t kThemeKey[] = L"Theme";
 constexpr wchar_t kSidebarWidthKey[] = L"SidebarWidth";
+constexpr wchar_t kFileListDetailScaleKey[] = L"FileListDetailScalePercent";
 constexpr wchar_t kWindowLeftKey[] = L"Left";
 constexpr wchar_t kWindowTopKey[] = L"Top";
 constexpr wchar_t kWindowWidthKey[] = L"Width";
@@ -34,6 +35,8 @@ constexpr wchar_t kFileListColumnWidthKeys[fileexplorer::Settings::kFileListColu
 
 constexpr int kSidebarWidthMinLogical = 180;
 constexpr int kSidebarWidthMaxLogical = 900;
+constexpr int kFileListDetailScaleMinPercent = 100;
+constexpr int kFileListDetailScaleMaxPercent = 300;
 constexpr int kColumnWidthMinLogical = 40;
 constexpr int kColumnWidthMaxLogical = 1800;
 constexpr int kWindowWidthMin = 720;
@@ -76,6 +79,8 @@ bool Settings::Load(Values* values) const {
             loaded.theme = L"dark";
         }
         loaded.sidebar_width_logical = ClampSidebarWidthLogical(loaded.sidebar_width_logical);
+        loaded.file_list_detail_scale_percent =
+            ClampFileListDetailScalePercent(loaded.file_list_detail_scale_percent);
         for (int i = 0; i < kFileListColumnCount; ++i) {
             loaded.file_list_column_widths_logical[static_cast<size_t>(i)] = ClampFileListColumnWidthLogical(
                 i,
@@ -117,6 +122,12 @@ bool Settings::Load(Values* values) const {
         loaded.sidebar_width_logical,
         storage_path_.c_str()));
     loaded.sidebar_width_logical = ClampSidebarWidthLogical(stored_sidebar_width);
+    const int stored_detail_scale = static_cast<int>(GetPrivateProfileIntW(
+        kGeneralSection,
+        kFileListDetailScaleKey,
+        loaded.file_list_detail_scale_percent,
+        storage_path_.c_str()));
+    loaded.file_list_detail_scale_percent = ClampFileListDetailScalePercent(stored_detail_scale);
     for (int i = 0; i < kFileListColumnCount; ++i) {
         const int stored_width = static_cast<int>(GetPrivateProfileIntW(
             kGeneralSection,
@@ -197,6 +208,16 @@ bool Settings::Save(const Values& values) const {
         return false;
     }
 
+    swprintf_s(buffer, L"%d", ClampFileListDetailScalePercent(values.file_list_detail_scale_percent));
+    if (!WritePrivateProfileStringW(
+            kGeneralSection,
+            kFileListDetailScaleKey,
+            buffer,
+            storage_path_.c_str())) {
+        LogLastError(L"WritePrivateProfileStringW(Settings FileListDetailScale)");
+        return false;
+    }
+
     for (int i = 0; i < kFileListColumnCount; ++i) {
         swprintf_s(
             buffer,
@@ -247,6 +268,10 @@ const std::wstring& Settings::storage_path() const noexcept {
 
 int Settings::ClampSidebarWidthLogical(int value) noexcept {
     return (std::max)(kSidebarWidthMinLogical, (std::min)(kSidebarWidthMaxLogical, value));
+}
+
+int Settings::ClampFileListDetailScalePercent(int value) noexcept {
+    return (std::max)(kFileListDetailScaleMinPercent, (std::min)(kFileListDetailScaleMaxPercent, value));
 }
 
 int Settings::ClampFileListColumnWidthLogical(int column_index, int value) noexcept {

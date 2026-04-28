@@ -69,6 +69,8 @@ private:
     void UpdateViewMenuChecks();
     void ToggleShowHiddenFiles();
     void ToggleShowExtensions();
+    void IncreaseDetailScale();
+    void ResetDetailScale();
     void LoadLayoutSettings();
     void LoadSessionState();
     void SaveSessionState() const;

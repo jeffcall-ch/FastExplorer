@@ -25,11 +25,11 @@ This is a MUST for every future deploy.
 ## Current Status
 
 ```text
-Last updated:      2026-04-23 by assistant
+Last updated:      2026-04-28 by assistant
 Current phase:     Phase 15 - Portable Release Build
 Current target:    CP-15 - PASS
 Last checkpoint:   CP-15 - PASS
-Build status:      PASS - Date Modified sort now mixes folders/files by timestamp; other columns keep folder-first
+Build status:      PASS - Release build validated and portable v1.0.8 deployed (versioned executable naming enforced)
 Tests status:      PASS - FileExplorer.Tests.exe runs and passes (57 tests, 0 failures)
 Blockers:          None
 ```
@@ -577,11 +577,918 @@ This section records every significant architectural or technical decision made 
 **Alternatives considered:** Keep global folder-first rule for Date Modified (rejected), remove folder-first behavior for all columns (rejected).  
 **Status:** Closed
 
+### AD-084 - 2026-04-23 - Detail Pane Accessibility Scaling via Context Menu (+5% / Reset)
+**Decision:** Add two detail-pane-only context menu actions: `Increase detail font + row spacing (+5%)` and `Default detail font + row spacing`. Persist a per-user scale setting in `settings.ini` (`FileListDetailScalePercent`) and apply it to list-body font plus report-row height metrics, while leaving the rest of the UI unchanged.  
+**Rationale:** User requested quick readability scaling for detail view only, with deterministic +5% increments and one-click return to current default.  
+**Alternatives considered:** Global UI scaling (rejected: requirement was detail pane only), font-only scaling without row metrics (rejected: did not satisfy row-spacing intent), non-persistent runtime-only scaling (rejected).  
+**Status:** Closed
+
+### AD-085 - 2026-04-23 - Deploy New Portable Revision v1.0.2.0 for Detail-Scale Feature
+**Decision:** Publish a new portable deployment revision `v1.0.2` with resource metadata `1.0.2.0`, package it as `FileExplorer_v1.0.2_portable`, and enforce version-in-filename executable naming (`FileExplorer_v1.0.2.exe`) plus package-local `REVISION.txt` notes.  
+**Rationale:** User requested an immediately testable portable build after implementing the detail-pane scaling feature.  
+**Alternatives considered:** Reuse `v1.0.1` package in place (rejected: weak traceability), keep non-versioned exe filename (rejected by mandatory naming rule).  
+**Status:** Closed
+
+### AD-086 - 2026-04-23 - Native Outbound Drag-and-Drop from Detail Pane
+**Decision:** Add native outbound drag support from the detail pane by handling `LVN_BEGINDRAG`, collecting selected filesystem paths, and invoking `DoDragDrop` with a custom `IDataObject` (`CF_HDROP` + preferred drop effect) and `IDropSource`.  
+**Rationale:** User requested dragging selected files/folders from FileExplorer directly into external targets, including website upload drop zones.  
+**Alternatives considered:** Clipboard-only copy/paste flow (rejected: does not satisfy drag-to-upload workflow), shell context-menu upload integration (rejected: target-specific and not general drag behavior).  
+**Status:** Closed
+
+### AD-087 - 2026-04-23 - Deploy New Portable Revision v1.0.3.0 for Outbound Drag-and-Drop
+**Decision:** Publish a new portable deployment revision `v1.0.3` with resource metadata `1.0.3.0`, package it as `FileExplorer_v1.0.3_portable`, and ship versioned executable naming (`FileExplorer_v1.0.3.exe`) with updated revision notes.  
+**Rationale:** User requested immediate deployment after drag-and-drop feature completion.  
+**Alternatives considered:** Reuse `v1.0.2` package in place (rejected: ambiguous release traceability), keep non-versioned executable name (rejected by mandatory release rule).  
+**Status:** Closed
+
+### AD-088 - 2026-04-23 - Drag Reliability Fix: Mouse-Threshold Start + Explorer Drop Acceptance
+**Decision:** Replace fragile drag start behavior with a mouse-threshold drag path in detail pane subclass handling (`WM_LBUTTONDOWN/WM_MOUSEMOVE`) and enable inbound Explorer file drops using `DragAcceptFiles` + `WM_DROPFILES`, importing dropped paths into current folder (or hovered folder row target).  
+**Rationale:** User reported that outbound drag did not start at all and inbound Explorer drag always showed blocked cursor.  
+**Alternatives considered:** Keep notify-only begin-drag (`LVN_BEGINDRAG`) path alone (rejected: unreliable in this detail-view interaction), defer inbound support to COM `IDropTarget` implementation only (rejected: higher complexity for immediate blocker fix).  
+**Status:** Closed
+
+### AD-089 - 2026-04-23 - Deploy New Portable Revision v1.0.4.0 for Drag/Drop Reliability Fix
+**Decision:** Publish a new portable deployment revision `v1.0.4` with resource metadata `1.0.4.0`, package it as `FileExplorer_v1.0.4_portable`, and ship versioned executable naming (`FileExplorer_v1.0.4.exe`) with updated release notes for inbound/outbound drag fixes.  
+**Rationale:** User reported deployed package still had old behavior; a new portable revision was required to deliver the actual fix.  
+**Alternatives considered:** Reuse `v1.0.3` package in place (rejected: ambiguous artifact traceability), keep non-versioned executable filename (rejected by mandatory release rule).  
+**Status:** Closed
+
+### AD-090 - 2026-04-23 - Outbound Drag Compatibility Hardening + v1.0.5 Deployment
+**Decision:** Harden outbound drag interoperability by switching app startup initialization to `OleInitialize` and implementing real `IDataObject::EnumFormatEtc` enumeration support; then deploy as `v1.0.5` portable (`1.0.5.0`).  
+**Rationale:** User confirmed inbound drop worked but outbound drag still failed against external targets.  
+**Alternatives considered:** Keep previous drag object with `EnumFormatEtc = E_NOTIMPL` (rejected: weak target compatibility), keep `CoInitializeEx` path only (rejected for OLE drag reliability).  
+**Status:** Closed
+
+### AD-091 - 2026-04-23 - Inbound Drop Duplicate Guard (Block + Warn)
+**Decision:** For Explorer-to-app drop operations, detect name collisions in the destination folder before import. If any file/folder name already exists (or duplicate names exist within the dropped set), block the entire drop and show a warning message.  
+**Rationale:** User requested explicit prevention of duplicate-name drops and clear warning feedback instead of allowing overwrite/merge behavior.  
+**Alternatives considered:** Allow shell default conflict dialogs (rejected: inconsistent UX and can still permit operation), auto-rename on drop (rejected: user explicitly requested block).  
+**Status:** Closed
+
+### AD-092 - 2026-04-23 - Shift Modifier Forces Move for Inbound Drop
+**Decision:** In `WM_DROPFILES` handling, use modifier-state semantics so inbound drop operation is copy by default, but becomes move when `Shift` is held (with `Ctrl` not held) at drop time.  
+**Rationale:** User requested expected file-manager behavior that `Shift + drag/drop` performs move instead of copy.  
+**Alternatives considered:** Always-copy behavior (rejected by user requirement), always-move behavior (rejected as nonstandard default).  
+**Status:** Closed
+
+### AD-093 - 2026-04-23 - Outbound Shift-Drag Interop: Allow Move Effect
+**Decision:** Update outbound drag (`StartExternalDrag`) to advertise `DROPEFFECT_COPY | DROPEFFECT_MOVE` instead of copy-only, and set preferred drop effect to move when Shift is held at drag start.  
+**Rationale:** User reported Shift-drag from app to Explorer showed blocked cursor (`no-drop`) because source only offered copy.  
+**Alternatives considered:** Keep copy-only source effect (rejected: breaks Shift-move workflow), force move-only under Shift (rejected: should still allow target negotiation).  
+**Status:** Closed
+
+### AD-094 - 2026-04-23 - Delete Selection Focus Retention Near Deleted Range
+**Decision:** In `FileListView::DeleteSelection`, stop using default-top focus reset after delete and instead reselect the nearest selectable row above the top deleted row, with downward fallback only when no selectable row exists above.  
+**Rationale:** User reported that delete/shift-delete jumped focus to the first row, forcing manual scroll-back and breaking workflow continuity.  
+**Alternatives considered:** Keep default first-row focus behavior (rejected: causes jump-to-top), preserve old focused index blindly (rejected: unreliable after row removal/group dividers).  
+**Status:** Closed
+
+### AD-095 - 2026-04-23 - Deploy New Portable Revision v1.0.6.0
+**Decision:** Publish a new portable deployment revision `v1.0.6` with resource metadata `1.0.6.0`, package it as `FileExplorer_v1.0.6_portable`, and ship versioned executable naming (`FileExplorer_v1.0.6.exe`) with updated release notes.  
+**Rationale:** User requested immediate deployment after validating recent interaction fixes.  
+**Alternatives considered:** Reuse `v1.0.5` package in place (rejected: ambiguous traceability), keep non-versioned executable name (rejected by mandatory release naming rule).  
+**Status:** Closed
+
+### AD-096 - 2026-04-23 - Detail Scale Row-Height Spacer Uses Transparent DIB (No Icon Artifacts)
+**Decision:** Replace detail-scale row-height spacer bitmap creation from `CreateBitmap(..., nullptr)` with an explicitly zeroed transparent 32-bit DIB, and clear state-image bits so the state image list remains layout-only (row-height control) without visible glyph artifacts.  
+**Rationale:** User reported small unwanted graphics next to icons when detail font/spacing scaling was increased.  
+**Alternatives considered:** Keep uninitialized monochrome spacer bitmap (rejected: can render garbage/artifacts), disable row-height scaling entirely (rejected).  
+**Status:** Closed
+
+### AD-097 - 2026-04-23 - State Spacer Uses Masked Colorkey Transparency for Comctl Compatibility
+**Decision:** Harden detail-scale state-image spacer rendering by using `ILC_COLOR32 | ILC_MASK` plus `ImageList_AddMasked(...)` with a colorkey-filled DIB, instead of relying on alpha-only transparency.  
+**Rationale:** User still observed residual icon-adjacent artifacts after the first fix; some ListView state-image draw paths do not treat alpha-only spacer pixels as fully transparent.  
+**Alternatives considered:** Keep alpha-only spacer path (rejected due residual artifacts), remove detail-spacing feature (rejected).  
+**Status:** Closed
+
+### AD-098 - 2026-04-23 - Virtual List Callback Mask Enforces No State Glyphs
+**Decision:** Set `ListView_SetCallbackMask(hwnd_, LVIS_STATEIMAGEMASK)` so every owner-data row requests state bits via `LVN_GETDISPINFO`, where state image is explicitly returned as none.  
+**Rationale:** Without callback mask, internal ListView state-image bits can persist or default unexpectedly on virtual rows, producing residual tiny glyphs next to file/folder icons.  
+**Alternatives considered:** Rely only on one-time `ListView_SetItemState(..., LVIS_STATEIMAGEMASK)` clearing (rejected: not deterministic for all virtual-row state paths).  
+**Status:** Closed
+
+### AD-099 - 2026-04-23 - Stable Scaled-State Spacer During Icon Refresh (Index 1 Blank Image)
+**Decision:** Use a full-width blank state spacer image (>=16 px wide, row-height tall) and force row state-image bits to `INDEXTOSTATEIMAGEMASK(1)` while scaled spacing is active.  
+**Rationale:** User reported artifacts reappearing after icon reload events; forcing a stable known blank state image index removes dependency on transient state-bit defaults during refresh/rebind cycles.  
+**Alternatives considered:** Keep zero state-image index (`no image`) path only (rejected: refresh timing still produced artifacts on some update paths).  
+**Status:** Closed
+
+### AD-100 - 2026-04-23 - Replace State-Image Row-Height Hack with Scaled Small-Image List Mapping
+**Decision:** Stop using `LVSIL_STATE` as row-height spacer in scaled detail mode. Instead, build a dedicated scaled `LVSIL_SMALL` image list and map system icon indices into it on-demand (`system index -> scaled small index`) so row height is controlled by the small-image list itself.  
+**Rationale:** User-reported artifacts persisted during icon refresh/reload cycles; internet research and behavior matched known ListView issues when combining `SmallImageList` and `StateImageList` for layout hacks.  
+**Alternatives considered:** Continue iterating on state-image suppression and masking (rejected: still unstable in user scenario), remove detail spacing feature (rejected).  
+**Status:** Closed
+
+### AD-101 - 2026-04-23 - Keep Default Icon Size in Scaled Detail Rows
+**Decision:** In scaled detail mode, preserve default icon size by composing each mapped icon into a taller transparent small-image-list cell (centered vertically) instead of using `ImageList_AddIcon` stretching to cell height.  
+**Rationale:** User explicitly requested that increasing detail font/row spacing must not scale icon size.  
+**Alternatives considered:** Keep stretched mapped icons from `ImageList_AddIcon` (rejected: icons grew with row height), disable row scaling (rejected).  
+**Status:** Closed
+
+### AD-102 - 2026-04-23 - Prevent Small-Icon Source Handle Churn During Image-List Swaps
+**Decision:** Enable `LVS_SHAREIMAGELISTS` on the detail ListView and use fixed default small-icon width when creating scaled row cells, so switching between system and scaled small-image lists does not invalidate the icon source or inflate icon glyph size.  
+**Rationale:** User reported icons still becoming larger than default after scaling; this indicated image-list lifetime/swap instability in the source icon path.  
+**Alternatives considered:** Continue swapping without shared-image-list style (rejected: can destabilize source list lifetime on some paths).  
+**Status:** Closed
+
+### AD-103 - 2026-04-23 - Deploy New Portable Revision v1.0.7.0 with Deferred Icon-Scaling Issue
+**Decision:** Publish portable revision `v1.0.7` (`1.0.7.0`) containing the current code state and explicitly document the remaining icon-size inconsistency under detail scaling as deferred per user request.  
+**Rationale:** User requested immediate deployment despite unresolved behavior, with issue deferred for later.  
+**Alternatives considered:** Block deployment until full fix (rejected by user direction).  
+**Status:** Closed
+
+### AD-104 - 2026-04-28 - Restrict File-Row Context Menu Shell Integration to 7-Zip Only
+**Decision:** Keep the custom row context menu as the default and integrate only the `7-Zip` branch from the shell context menu (when present), instead of appending all shell extensions.  
+**Rationale:** User explicitly requested 7-Zip support without exposing the full shell-extension surface in the app context menu.  
+**Alternatives considered:** Append complete shell context menu (rejected by user requirement), no shell integration (rejected because 7-Zip command support was requested).  
+**Status:** Closed
+
+### AD-105 - 2026-04-28 - Add OLE IDataObject Drop Target + Virtual File Import Path
+**Decision:** Extend detail-pane drag-in support beyond `WM_DROPFILES` (`CF_HDROP`) by registering an OLE `IDropTarget` on the ListView and handling `IDataObject` formats including `CF_HDROP`, `CFSTR_SHELLIDLIST`, `CFSTR_FILENAMEW`, `CF_UNICODETEXT`, and virtual-file transfer via `CFSTR_FILEDESCRIPTORW` + `CFSTR_FILECONTENTS`.  
+**Rationale:** User-reported drag-in failures (Outlook email items, MobaXterm-originated drags) require data-object format handling that `WM_DROPFILES` alone cannot provide.  
+**Alternatives considered:** Keep `WM_DROPFILES` only (rejected as insufficient), accept all drops without conflict checks (rejected to preserve explicit no-overwrite product behavior).  
+**Status:** Closed
+
+### AD-106 - 2026-04-28 - Defer Detail-Pane Focus Restore After Activation
+**Decision:** Replace immediate `SetFocus(file_list_hwnd_)` on `WM_ACTIVATE` with a deferred posted message (`kMessageEnsureFileListFocus`) and also trigger it from `WM_ACTIVATEAPP`, then apply focus only after activation settles and the app is foreground.  
+**Rationale:** Immediate focus assignment during activation can be overridden by subsequent default activation handling; deferred focus avoids that race and keeps arrow-key navigation ready when returning to the app.  
+**Alternatives considered:** Keep immediate focus in `WM_ACTIVATE` only (rejected due unreliable behavior), force focus in broader focus messages (rejected to avoid stealing focus during normal in-app interactions).  
+**Status:** Closed
+
+### AD-107 - 2026-04-28 - Middle-Click Tab Close in Tab Strip
+**Decision:** Add explicit `WM_MBUTTONUP` handling in `TabStrip` so middle-clicking a tab row closes the tab under the cursor (tab body or close-glyph hit region) using existing `TabManager::CloseTab(...)`, then notifies parent and refreshes the strip.  
+**Rationale:** User requested standard browser/explorer-like middle mouse behavior for faster tab management.  
+**Alternatives considered:** Restrict close behavior to the close button only (rejected), close on middle-button-down instead of up (rejected to avoid premature close while pointer movement is still in progress).  
+**Status:** Closed
+
+### AD-108 - 2026-04-28 - Middle-Click Reliability: Execute Close on Button-Down
+**Decision:** Move effective middle-click close execution to `WM_MBUTTONDOWN` in `TabStrip` and keep `WM_MBUTTONUP` as a no-op.  
+**Rationale:** User reported no action on middle click; closing on button-down avoids reliance on middle-button-up delivery, which can be inconsistent with some mouse/driver combinations over custom child controls.  
+**Alternatives considered:** Keep up-only behavior (rejected after user regression report), close on both down and up (rejected because it can close unintended second tabs).  
+**Status:** Closed
+
+### AD-109 - 2026-04-28 - Middle-Click Hardening via Main/Non-Client Fallback + On-Demand Tab Hit Layout
+**Decision:** Add middle-click close fallback handling in `MainWindow` for `WM_MBUTTONDOWN` and `WM_NCMBUTTONDOWN`, route those points through `TabStrip::CloseTabFromParentClientPoint(...)`, and rebuild tab layout on-demand before hit testing for middle-click close paths.  
+**Rationale:** User still observed no close action; depending solely on child `WM_MBUTTON*` can miss paths when input is routed through the parent or non-client processing, and stale tab-hit layout can miss clicks after geometry changes.  
+**Alternatives considered:** Keep child-only middle handlers (rejected by user runtime result), add debug-only logging without behavior fallback (rejected as insufficient for immediate fix).  
+**Status:** Closed
+
+### AD-110 - 2026-04-28 - Deploy New Portable Revision v1.0.8.0
+**Decision:** Publish a new portable deployment revision `v1.0.8` with version resource `1.0.8.0`, package it as `FileExplorer_v1.0.8_portable`, and ship versioned executable naming (`FileExplorer_v1.0.8.exe`) with updated release notes.  
+**Rationale:** User requested immediate deployment after validating middle-click close behavior and asked to follow journal release naming rules.  
+**Alternatives considered:** Reuse existing `v1.0.7` package (rejected: missing latest fixes), keep non-versioned executable name (rejected by mandatory release naming rule).  
+**Status:** Closed
+
 ---
 
 ## Session Log
 
 Entries are appended in reverse chronological order (newest at top).
+
+### Session 105 - 2026-04-28
+**Phase:** Phase 15 - Portable Release Build (deployment)  
+**Goal for this session:** Deploy the current code state as a new portable revision according to journal naming rules.  
+**Completed:**  
+- Bumped release metadata in [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc):
+  - `FILEVERSION` -> `1,0,8,0`
+  - `PRODUCTVERSION` -> `1,0,8,0`
+  - `FileVersion` / `ProductVersion` strings -> `1.0.8.0`.  
+- Built release binary:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal` PASS.  
+- Created portable package [FileExplorer_v1.0.8_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.8_portable) containing:
+  - `FileExplorer_v1.0.8.exe`
+  - `README.txt`
+  - `REVISION.txt`.  
+- Created deploy archive:
+  - [FileExplorer_v1.0.8_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.8_portable.zip).  
+- Verified packaged executable metadata:
+  - `FileVersion = 1.0.8.0`
+  - `ProductVersion = 1.0.8.0`.  
+- Ran unit tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- None for this deploy request.  
+**Decisions made:** AD-110  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- KI-008 remains open.
+- KI-009 remains partial pending user verification in Outlook/MobaXterm scenarios.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates `v1.0.8` portable on target machine and requests next functional updates.
+
+### Session 104 - 2026-04-28
+**Phase:** Phase 15 - Portable Release Build (post-release tab interaction reliability follow-up)  
+**Goal for this session:** Fix persistent middle-click no-op behavior after prior button-down change.  
+**Completed:**  
+- Updated [TabStrip.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/TabStrip.h):
+  - added `CloseTabFromParentClientPoint(POINT)` public entry point
+  - added private helpers `CloseTabAtClientPoint(POINT)` and `RebuildLayoutForHitTesting()`.  
+- Updated [TabStrip.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/TabStrip.cpp):
+  - implemented `CloseTabFromParentClientPoint(...)`
+  - implemented on-demand `RebuildLayoutForHitTesting()` before middle-click hit tests
+  - centralized close logic in `CloseTabAtClientPoint(...)`
+  - switched `HandleMiddleButtonDown(...)` to shared close helper
+  - hardened parent->child point mapping checks.  
+- Updated [MainWindow.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/MainWindow.cpp):
+  - added `WM_MBUTTONDOWN` fallback path
+  - added `WM_NCMBUTTONDOWN` fallback path
+  - both route click points to `tab_strip_.CloseTabFromParentClientPoint(...)`.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy was not requested in this session.  
+**Decisions made:** AD-109  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- KI-008 remains open.
+- KI-009 remains partial pending user verification in Outlook/MobaXterm scenarios.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User retests middle-click close after fallback hardening; if still failing, add live input tracing for `WM_MBUTTON*`/`WM_NCMBUTTON*` in user environment.
+
+### Session 103 - 2026-04-28
+**Phase:** Phase 15 - Portable Release Build (post-release tab interaction reliability follow-up)  
+**Goal for this session:** Fix middle-click tab close not triggering in runtime testing.  
+**Completed:**  
+- Updated [TabStrip.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/TabStrip.h):
+  - added `HandleMiddleButtonDown(POINT)` declaration.  
+- Updated [TabStrip.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/TabStrip.cpp):
+  - added `HandleMiddleButtonDown(POINT)` and moved close logic there
+  - wired `WM_MBUTTONDOWN` to trigger middle-click close
+  - left `WM_MBUTTONUP` as explicit no-op to avoid duplicate closes.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy was not requested in this session.  
+**Decisions made:** AD-108  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- KI-008 remains open.
+- KI-009 remains partial pending user verification in Outlook/MobaXterm scenarios.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User retests middle-click close behavior; if confirmed, proceed to next requested feature/fix.
+
+### Session 102 - 2026-04-28
+**Phase:** Phase 15 - Portable Release Build (post-release tab interaction update)  
+**Goal for this session:** Implement middle mouse button tab-close behavior in the tab strip.  
+**Completed:**  
+- Updated [TabStrip.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/TabStrip.h):
+  - added `HandleMiddleButtonUp(POINT)` declaration.  
+- Updated [TabStrip.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/TabStrip.cpp):
+  - implemented `HandleMiddleButtonUp(POINT)` to close hit tab using existing `TabManager::CloseTab(...)`
+  - wired `WM_MBUTTONUP` in `HandleMessage(...)` to call the new handler
+  - ensured successful close path continues through existing parent notification and strip refresh.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy was not requested in this session.  
+**Decisions made:** AD-107  
+**Errors encountered and resolved:**  
+- `msbuild` was not on PATH; resolved by invoking full MSBuild path under Visual Studio 18 installation.  
+**Errors unresolved / carried forward:**  
+- Solution-level build can fail with `LNK1104` if `x64\\Debug\\FileExplorer.exe` is currently lock-held by a running process.  
+- KI-008 remains open.
+- KI-009 remains partial pending user verification in Outlook/MobaXterm scenarios.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User runtime-checks middle-click close behavior; if confirmed, continue with next requested UX updates.
+
+### Session 101 - 2026-04-28
+**Phase:** Phase 15 - Portable Release Build (post-release focus reliability fix)  
+**Goal for this session:** Fix detail-pane focus restore so keyboard arrows work immediately when returning to the app window.  
+**Completed:**  
+- Updated [MainWindow.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/MainWindow.cpp):
+  - added deferred focus message constant `kMessageEnsureFileListFocus`
+  - changed `WM_ACTIVATE` handling to post deferred focus message instead of immediate `SetFocus`
+  - added `WM_ACTIVATEAPP` hook to post the same deferred focus message on app activation
+  - added message handler that applies focus only when window is foreground, not iconic, and list view is enabled.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Runtime validation by user on target environment is pending.  
+**Decisions made:** AD-106  
+**Errors encountered and resolved:**  
+- Build initially failed with `LNK1168` because `x64\\Debug\\FileExplorer.exe` was running; resolved by stopping running process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- KI-008 remains open.
+- KI-009 remains partial pending user verification in Outlook/MobaXterm scenarios.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User verifies activation focus behavior; if confirmed, continue with deploy request or remaining KI items.
+
+### Session 100 - 2026-04-28
+**Phase:** Phase 15 - Portable Release Build (post-release drag/drop compatibility update)  
+**Goal for this session:** Implement missing drag-in compatibility support from non-`CF_HDROP` sources (Outlook/MobaXterm scenarios) while preserving existing duplicate-name blocking behavior.  
+**Completed:**  
+- Updated [FileListView.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.h):
+  - added OLE drop-target integration hooks and data-object drop handling declarations (`IDataObject` path extraction + virtual-file import).  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - added `OleDropTarget` (`IDropTarget`) implementation
+  - registered/revoked OLE drop target via `RegisterDragDrop` / `RevokeDragDrop`
+  - kept `WM_DROPFILES` path and routed it through shared drop-apply logic
+  - added `IDataObject` extraction support for:
+    - `CF_HDROP`
+    - `CFSTR_SHELLIDLIST` (PIDL-based extraction)
+    - `CFSTR_FILENAMEW`
+    - `CF_UNICODETEXT` (path-text fallback)
+  - added virtual-file import support for:
+    - `CFSTR_FILEDESCRIPTORW`
+    - `CFSTR_FILECONTENTS` (`TYMED_ISTREAM`, `TYMED_HGLOBAL`, `TYMED_FILE`, `TYMED_ISTORAGE`)
+  - preserved drop conflict checks and warning popup behavior before write/import.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- KI-008 icon-size/scaling inconsistency remains deferred/open.  
+**Decisions made:** AD-105  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- KI-008 remains open.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User verifies drag-in behavior specifically for Outlook email and MobaXterm drag sources; if both pass, close KI-009.
+
+### Session 099 - 2026-04-28
+**Phase:** Phase 15 - Portable Release Build (post-release feature update)  
+**Goal for this session:** Add only 7-Zip shell actions to file-row right-click menu and track newly reported drag-in compatibility gaps.  
+**Completed:**  
+- Updated [FileListView.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.h):
+  - added `AppendSevenZipContextMenu(...)` declaration.  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - added menu-label helpers for identifying `7-Zip` shell row
+  - added `AppendSevenZipContextMenu(...)` implementation that:
+    - builds a temporary shell context menu
+    - extracts only the `7-Zip` item/submenu
+    - appends only that branch into the app context menu
+    - preserves shell command invocation through existing `IContextMenu::InvokeCommand` path
+  - wired `ShowContextMenu(...)` to append `7-Zip` only for row targets
+  - routed unmatched row-menu commands through shell invocation path so selected 7-Zip actions execute correctly.  
+- Updated [DEVELOPMENT_JOURNAL.MD](/C:/Users/Administrator/repos/FastExplorer/DEVELOPMENT_JOURNAL.MD):
+  - added `KI-009` (open) for drag-in compatibility failures from Outlook and MobaXterm
+  - added AD-104 decision entry for 7-Zip-only integration.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Implementation of drag-in support for non-`CF_HDROP` data sources (Outlook virtual items, MobaXterm drag format) remains open under KI-009.  
+**Decisions made:** AD-104  
+**Errors encountered and resolved:**  
+- Initial `msbuild` command failed because `msbuild` was not on `PATH`; resolved by using Visual Studio 18 full MSBuild path.  
+**Errors unresolved / carried forward:**  
+- KI-008 and KI-009 remain open.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates the new 7-Zip-only row context behavior on target machines, then we implement KI-009 drag-in format compatibility.
+
+### Session 098 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (deployment)  
+**Goal for this session:** Deploy current state as a new portable revision and defer remaining icon-scaling inconsistency for later.  
+**Completed:**  
+- Bumped release metadata in [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc):
+  - `FILEVERSION` -> `1,0,7,0`
+  - `PRODUCTVERSION` -> `1,0,7,0`
+  - `FileVersion` / `ProductVersion` strings -> `1.0.7.0`.  
+- Built release binary:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Release /p:Platform=x64 /v:minimal` PASS.  
+- Created portable package [FileExplorer_v1.0.7_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.7_portable) containing:
+  - `FileExplorer_v1.0.7.exe`
+  - `README.txt`
+  - `REVISION.txt` (notes include deferred icon-scaling issue).  
+- Created deploy archive:
+  - [FileExplorer_v1.0.7_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.7_portable.zip).  
+- Verified packaged executable metadata:
+  - `FileVersion = 1.0.7.0`
+  - `ProductVersion = 1.0.7.0`.  
+- Ran regression tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Final root-cause fix for icon-size inconsistency under detail scaling (deferred by user request).  
+**Decisions made:** AD-103  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- Icon-size inconsistency under detail scaling remains deferred.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- Resume icon-scaling root-cause fix when user wants to continue.
+
+### Session 097 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UI bugfix follow-up)  
+**Goal for this session:** Keep icons at default size consistently after scaling and refresh cycles by stabilizing ListView image-list lifetime behavior.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - enabled `LVS_SHAREIMAGELISTS` for details ListView creation
+  - fixed scaled small-image-list cell width to default small-icon width source (no widened icon cell side effects).  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-102  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates that icon size remains default in all scaled/refresh scenarios and confirms if deployment is needed.
+
+### Session 096 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UI bugfix follow-up)  
+**Goal for this session:** Keep icons at default size while detail font/row spacing scaling remains active.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - added transparent DIB composition helper for mapped scaled-list cells
+  - changed `ResolveScaledSmallIconIndex(...)` to compose default-size system icon centered inside a taller transparent cell
+  - removed icon-stretch path (`ImageList_AddIcon`) for scaled detail rows.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-101  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates that icons remain default size at increased detail scale and confirms if deployment is needed.
+
+### Session 095 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UI bugfix follow-up)  
+**Goal for this session:** Resolve icon artifacts that reappear after icon reload by removing state-image-list dependency from scaled detail rows.  
+**Completed:**  
+- Updated [FileListView.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.h):
+  - `HandleGetDispInfo(...)` made non-const for icon-index remapping cache updates
+  - added scaled icon remap cache (`system icon index -> scaled small image index`)
+  - added helper declaration `ResolveScaledSmallIconIndex(...)`.  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - replaced state-image spacer usage with dedicated scaled small-image-list pipeline in `ApplyDetailScaleToListMetrics()`
+  - list now switches between system small image list (default scale) and scaled small image list (>100%)
+  - owner-data image callback remaps icon indices on-demand into scaled list for stable rendering across refresh cycles
+  - removed state-image callback rendering path tied to spacing hack.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-100  
+**Errors encountered and resolved:**  
+- Build initially failed due missing `<unordered_map>` include in `FileListView.h`; fixed by adding the include and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates scaled detail mode through icon reload cycles and confirms whether deployment is needed.
+
+### Session 094 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UI bugfix follow-up)  
+**Goal for this session:** Fix remaining icon artifacts that reappear after post-scale icon reload/update events.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - state spacer bitmap now uses full icon-width blank image instead of 1px width
+  - state image is pinned to index 1 (`INDEXTOSTATEIMAGEMASK(1)`) when scaled spacing is active
+  - owner-data state callback returns index 1 for deterministic blank-state drawing while spacer list is attached.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-099  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates scaling + subsequent icon refresh behavior and confirms whether deployment is required.
+
+### Session 093 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UI bugfix follow-up)  
+**Goal for this session:** Eliminate remaining icon-adjacent glyph artifacts in scaled detail mode by forcing callback-controlled state suppression in owner-data list rows.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - added `ListView_SetCallbackMask(hwnd_, LVIS_STATEIMAGEMASK)` in list initialization
+  - keeps per-row `LVN_GETDISPINFO` state return path authoritative (`state image = none`).  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-098  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates detail-scale rendering in environment and confirms if deploy is needed.
+
+### Session 092 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UI bugfix follow-up)  
+**Goal for this session:** Eliminate remaining icon-adjacent artifacts in detail-scale mode seen after initial spacer fix.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - switched row-height spacer image list to `ILC_COLOR32 | ILC_MASK`
+  - replaced alpha-only spacer insertion with `ImageList_AddMasked(...)` colorkey path
+  - added solid-colorkey DIB helper for deterministic transparent masking across common-control draw paths.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-097  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates detail-scale rendering in their environment and confirms whether packaging/deploy is required.
+
+### Session 091 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UI bugfix)  
+**Goal for this session:** Fix icon artifacts appearing when detail pane font/row spacing scale is increased.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - added transparent DIB helper for row-height spacer bitmap creation
+  - switched state image list spacer from uninitialized monochrome bitmap to initialized transparent 32-bit bitmap
+  - explicitly clears `LVIS_STATEIMAGEMASK` to keep state image list invisible/layout-only
+  - suppresses visible state glyphs in `LVN_GETDISPINFO` state requests.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-096  
+**Errors encountered and resolved:**  
+- `LNK1168` due running `FileExplorer.exe`; resolved by stopping process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates detail-scale icon rendering on their machine and confirms whether to deploy a new portable revision.
+
+### Session 090 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (deployment)  
+**Goal for this session:** Deploy a new portable package containing latest delete-focus and drag/drop workflow fixes.  
+**Completed:**  
+- Bumped release metadata in [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc):
+  - `FILEVERSION` -> `1,0,6,0`
+  - `PRODUCTVERSION` -> `1,0,6,0`
+  - `FileVersion` / `ProductVersion` strings -> `1.0.6.0`.  
+- Built release binary:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Release /p:Platform=x64 /v:minimal` PASS.  
+- Created portable package [FileExplorer_v1.0.6_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.6_portable) containing:
+  - `FileExplorer_v1.0.6.exe`
+  - `README.txt`
+  - `REVISION.txt`.  
+- Created deploy archive:
+  - [FileExplorer_v1.0.6_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.6_portable.zip).  
+- Verified packaged executable metadata:
+  - `FileVersion = 1.0.6.0`
+  - `ProductVersion = 1.0.6.0`.  
+- Ran regression tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-095  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates `v1.0.6` portable package in real workflow and confirms if additional deployment refinements are needed.
+
+### Session 089 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UX refinement)  
+**Goal for this session:** Keep delete focus near the deletion point instead of jumping to the top row.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - `DeleteSelection(...)` now captures the top deleted row index
+  - after list rebuild, focus/selection is restored to one row above that deleted range
+  - added fallback to closest valid selectable row when the above row does not exist.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer\\FileExplorer.vcxproj /p:Configuration=Debug /p:Platform=x64 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-094  
+**Errors encountered and resolved:**  
+- `msbuild` not found on `PATH`; resolved by using full Visual Studio `MSBuild.exe` path.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates delete and shift-delete focus behavior across single and multi-selection deletes.
+
+### Session 088 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release drag interop fix)  
+**Goal for this session:** Fix Shift+drag from app to Explorer showing stop-sign cursor (no drop).  
+**Completed:**  
+- Updated outbound drag behavior in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - drag source now allows both `COPY` and `MOVE` effects (`DROPEFFECT_COPY | DROPEFFECT_MOVE`)
+  - preferred drop effect is set to move when Shift is held at drag start, copy otherwise.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-093  
+**Errors encountered and resolved:**  
+- `LNK1168` while rebuilding because `FileExplorer.exe` was still running; resolved by stopping process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates Shift-drag from app to Explorer and confirms whether to deploy a new portable revision.
+
+### Session 087 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release drop behavior refinement)  
+**Goal for this session:** Make inbound Explorer->app drag/drop use move when Shift is pressed, otherwise copy.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - in `WM_DROPFILES`, reads modifier keys at drop time
+  - applies operation mode:
+    - default drop -> copy
+    - `Shift` (without `Ctrl`) -> move
+  - passes computed move/copy mode to `FileOps::ImportPaths(...)`.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-092  
+**Errors encountered and resolved:**  
+- `LNK1168` due running `FileExplorer.exe` lock during build; resolved by stopping active process and rebuilding.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates `Shift`-drop move behavior and confirms whether to deploy a new portable revision.
+
+### Session 086 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release drop-behavior refinement)  
+**Goal for this session:** Enforce duplicate-name blocking when dragging files/folders from Explorer into the app detail pane.  
+**Completed:**  
+- Updated inbound drop flow in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - added pre-import duplicate detection against drop destination folder
+  - blocks entire drop if any conflicting name exists
+  - shows warning dialog indicating the conflicting item name
+  - also blocks if dropped set contains duplicate leaf names.  
+- Added helper logic for conflict checks in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - `JoinPathForDropTarget(...)`
+  - `TryFindDropNameConflict(...)`.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- Portable redeploy not requested in this step.  
+**Decisions made:** AD-091  
+**Errors encountered and resolved:**  
+- `C4457` (warning-as-error) due local variable name shadowing (`message`) in subclass handler; fixed by renaming to `warning_message`.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates duplicate-name drop guard behavior and confirms whether to deploy a new portable revision.
+
+### Session 085 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (deployment)  
+**Goal for this session:** Deploy a new portable revision with additional outbound drag compatibility fixes after user still reported one-way drag failure.  
+**Completed:**  
+- Added outbound drag compatibility hardening:
+  - switched startup initialization to `OleInitialize` in [App.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/App.cpp)
+  - added full `IDataObject::EnumFormatEtc` implementation in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp).  
+- Bumped release metadata in [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc):
+  - `FILEVERSION` -> `1,0,5,0`
+  - `PRODUCTVERSION` -> `1,0,5,0`
+  - `FileVersion` / `ProductVersion` strings -> `1.0.5.0`.  
+- Built `Release|x64` successfully:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal` PASS.  
+- Created portable package [FileExplorer_v1.0.5_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.5_portable) containing:
+  - `FileExplorer_v1.0.5.exe`
+  - `README.txt`
+  - `REVISION.txt`.  
+- Created deploy archive:
+  - [FileExplorer_v1.0.5_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.5_portable.zip).  
+- Verified packaged executable metadata:
+  - `FileVersion = 1.0.5.0`
+  - `ProductVersion = 1.0.5.0`.  
+- Ran regression tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-090  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates `v1.0.5` outbound drag to website upload targets and confirms issue closure.
+
+### Session 084 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (deployment)  
+**Goal for this session:** Deploy a new portable build containing the drag/drop reliability fix after user reported old behavior still in deployed package.  
+**Completed:**  
+- Bumped release metadata in [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc):
+  - `FILEVERSION` -> `1,0,4,0`
+  - `PRODUCTVERSION` -> `1,0,4,0`
+  - `FileVersion` / `ProductVersion` strings -> `1.0.4.0`.  
+- Built `Release|x64` successfully:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal` PASS.  
+- Created portable package [FileExplorer_v1.0.4_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.4_portable) containing:
+  - `FileExplorer_v1.0.4.exe`
+  - `README.txt`
+  - `REVISION.txt`.  
+- Created deploy archive:
+  - [FileExplorer_v1.0.4_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.4_portable.zip).  
+- Verified packaged executable metadata:
+  - `FileVersion = 1.0.4.0`
+  - `ProductVersion = 1.0.4.0`.  
+- Ran regression tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-089  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates `v1.0.4` portable package drag behaviors in real workflows.
+
+### Session 083 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release bugfix)  
+**Goal for this session:** Fix user-reported drag regressions: outbound drag not starting from detail pane and inbound Explorer drag blocked with stop cursor.  
+**Completed:**  
+- Updated [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - added robust mouse-threshold drag start path from detail pane (`WM_LBUTTONDOWN` + `WM_MOUSEMOVE`)
+  - preserved multi-selection drag behavior when dragging selected items
+  - enabled inbound file-drop acceptance via `DragAcceptFiles(...)`
+  - implemented `WM_DROPFILES` handling to import dropped paths into current folder or hovered folder row target
+  - refreshes detail pane after successful import.  
+- Updated [FileListView.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.h):
+  - added drag-candidate state fields for mouse-threshold drag start.  
+- Updated [FileOps.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileOps.h) and [FileOps.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileOps.cpp):
+  - added `ImportPaths(...)` helper to perform copy/move shell import operations for dropped files.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed, 0 failed`).  
+**Not completed / carried forward:**  
+- Runtime confirmation on your machine for browser-upload drag target and Explorer-to-detail drop target behavior.  
+**Decisions made:** AD-088  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates both drag directions in real usage and confirms whether to ship a fresh portable revision.
+
+### Session 082 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (deployment)  
+**Goal for this session:** Deploy a new portable release containing outbound detail-pane drag-and-drop support.  
+**Completed:**  
+- Bumped release metadata in [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc):
+  - `FILEVERSION` -> `1,0,3,0`
+  - `PRODUCTVERSION` -> `1,0,3,0`
+  - `FileVersion` / `ProductVersion` strings -> `1.0.3.0`.  
+- Built `Release|x64` successfully:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal` PASS.  
+- Created portable package [FileExplorer_v1.0.3_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.3_portable) containing:
+  - `FileExplorer_v1.0.3.exe`
+  - `README.txt`
+  - `REVISION.txt`.  
+- Created deploy archive:
+  - [FileExplorer_v1.0.3_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.3_portable.zip).  
+- Verified packaged executable metadata:
+  - `FileVersion = 1.0.3.0`
+  - `ProductVersion = 1.0.3.0`.  
+- Ran regression tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-087  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates `v1.0.3` portable build on real upload/drop targets and confirms deployment notes format.
+
+### Session 081 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (post-release UX enhancement)  
+**Goal for this session:** Enable drag-and-drop from detail pane selections to external applications (including web upload targets).  
+**Completed:**  
+- Added list-view drag entry point in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - handles `LVN_BEGINDRAG` in `HandleNotify(...)`
+  - normalizes begin-drag selection behavior (single item or multi-selection).  
+- Added drag source behavior in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - `HandleBeginDrag(...)`
+  - `StartExternalDrag(...)`
+  - COM drag payload wiring via custom `ExternalDragDataObject` (`CF_HDROP`, preferred drop effect)
+  - custom `ExternalDragDropSource` with standard mouse-button release/escape semantics.  
+- Added method declarations in [FileListView.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.h) for drag handlers/helpers.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed, 0 failed`).  
+**Not completed / carried forward:**  
+- Manual runtime validation on browser-specific upload UIs remains for user confirmation.  
+**Decisions made:** AD-086  
+**Errors encountered and resolved:**  
+- Initial compile iteration failed due two issues:
+  - `CreateStdEnumFmtEtc` unresolved identifier in this toolchain
+  - COM helper destructors incorrectly marked `override`
+  Resolved by using `EnumFormatEtc -> E_NOTIMPL` fallback and removing invalid `override` specifiers.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates drag from detail pane into a browser upload drop-zone and confirms behavior on file/folder multi-selection.
+
+### Session 080 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (deployment)  
+**Goal for this session:** Build and publish a new portable revision after detail-pane scaling feature delivery.  
+**Completed:**  
+- Bumped release metadata in [resource.rc](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/resource.rc):
+  - `FILEVERSION` -> `1,0,2,0`
+  - `PRODUCTVERSION` -> `1,0,2,0`
+  - `FileVersion` / `ProductVersion` strings -> `1.0.2.0`.  
+- Built `Release|x64` successfully:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Release /p:Platform=x64 /m:1 /v:minimal` PASS.  
+- Created portable package [FileExplorer_v1.0.2_portable](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.2_portable) containing:
+  - `FileExplorer_v1.0.2.exe`
+  - `README.txt`
+  - `REVISION.txt`.  
+- Created deploy archive:
+  - [FileExplorer_v1.0.2_portable.zip](/C:/Users/Administrator/repos/FastExplorer/FileExplorer_v1.0.2_portable.zip).  
+- Verified packaged executable metadata:
+  - `FileVersion = 1.0.2.0`
+  - `ProductVersion = 1.0.2.0`.  
+- Ran regression tests:
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed`, `0 failed`).  
+**Not completed / carried forward:**  
+- None.  
+**Decisions made:** AD-085  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User tests `v1.0.2` portable package and confirms release-note expectations.
+
+### Session 079 - 2026-04-23
+**Phase:** Phase 15 - Portable Release Build (detail-pane readability control refinement)  
+**Goal for this session:** Implement two right-click detail-pane actions to increase detail font/vertical row spacing by +5% per invocation and reset to the default, with persistence across sessions.  
+**Completed:**  
+- Added two detail-pane context menu commands in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - `Increase detail font + row spacing (+5%)`
+  - `Default detail font + row spacing`  
+- Added new file-list messages in [FileListView.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.h):
+  - `WM_FE_FILELIST_INCREASE_DETAIL_SCALE`
+  - `WM_FE_FILELIST_RESET_DETAIL_SCALE`  
+- Added detail scale application logic in [FileListView.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/FileListView.cpp):
+  - `SetDetailScalePercent(...)` to apply list-body font scaling
+  - `ApplyDetailScaleToListMetrics()` to adjust report-row height via a state-image-list spacer
+  - clamps scale to `100..300` percent and disables context-menu actions at min/max.  
+- Added persistent setting in [Settings.h](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/Settings.h) and [Settings.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/Settings.cpp):
+  - new INI key: `FileListDetailScalePercent`
+  - load/save + clamp support (`100..300`).  
+- Routed behavior through [MainWindow.cpp](/C:/Users/Administrator/repos/FastExplorer/FileExplorer/src/MainWindow.cpp):
+  - new handlers `IncreaseDetailScale()` / `ResetDetailScale()`
+  - +5% increment per call
+  - immediate persistence via `SaveLayoutSettings()`
+  - startup apply from loaded settings.  
+- Build/test verification:
+  - `MSBuild.exe FileExplorer.sln /p:Configuration=Debug /p:Platform=x64 /m:1 /v:minimal` PASS
+  - `x64\\Debug\\FileExplorer.Tests.exe` PASS (`57 passed, 0 failed`).  
+**Not completed / carried forward:**  
+- Runtime UX validation on user workstation for preferred max comfort range (100..300 clamp may be tuned later if needed).  
+**Decisions made:** AD-084  
+**Errors encountered and resolved:**  
+- None.  
+**Errors unresolved / carried forward:**  
+- None.  
+**Checkpoint status:** CP-15 - Pass  
+**Next session should start with:**  
+- User validates context-menu scaling feel (step size, max clamp, reset behavior) in real folders and confirms if tuning is needed.
 
 ### Session 078 - 2026-04-23
 **Phase:** Phase 15 - Portable Release Build (post-release sort behavior refinement)  
@@ -2585,12 +3492,244 @@ Entries are appended in reverse chronological order (newest at top).
 | KI-005 | 4 | Low | CP-04 interactive verification/sign-off was pending and is now resolved after user confirmation. | Closed |
 | KI-006 | 5 | Low | CP-05 interactive verification/sign-off was pending and is now resolved after final parent-navigation selection fix. | Closed |
 | KI-007 | 6 | Low | CP-06 sidebar shell verification pending item is resolved after user sign-off; tracking closed. | Closed |
+| KI-008 | 15 | Low | Detail-pane scaling can still cause icon-size inconsistency in some environments after refresh/reload cycles. Deferred by user request for now. | Open |
+| KI-009 | 15 | High | Extended drag-in support implemented via OLE `IDataObject` handling (`CF_HDROP`, `CFSTR_SHELLIDLIST`, `CFSTR_FILENAMEW`, `CF_UNICODETEXT`, and `CFSTR_FILEDESCRIPTORW` + `CFSTR_FILECONTENTS`). User verification is still required for Outlook email and MobaXterm specific drag sources before closing. | Partial |
 
 Severity: Blocker | High | Low | Debt
 
 ---
 
 ## Test Results Log
+
+### Test Run 090 - 2026-04-28
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-deferred-activation-focus fix)  
+**Failures:**  
+- None
+
+### Test Run 089 - 2026-04-28
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-OLE drop-target + virtual-file import implementation)  
+**Failures:**  
+- None
+
+### Test Run 088 - 2026-04-28
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-7-Zip-only context-menu integration + KI-009 tracking update)  
+**Failures:**  
+- None
+
+### Test Run 087 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-v1.0.7 deployment regression run)  
+**Failures:**  
+- None
+
+### Test Run 086 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-image-list-lifetime stabilization fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 085 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-default-icon-size-in-scaled-rows fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 084 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-scaled-small-image-list remap fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 083 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-stable-blank-state-index fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 082 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-callback-mask state suppression fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 081 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-masked-spacer transparency compatibility fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 080 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-detail-scale icon artifact fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 079 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-v1.0.6 portable deployment regression run)  
+**Failures:**  
+- None
+
+### Test Run 078 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-delete focus-retention fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 077 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-outbound-shift-drag interop fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 076 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-shift-to-move inbound-drop behavior update regression run)  
+**Failures:**  
+- None
+
+### Test Run 075 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-inbound-drop duplicate-guard implementation regression run)  
+**Failures:**  
+- None
+
+### Test Run 074 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-v1.0.5 portable deployment regression run)  
+**Failures:**  
+- None
+
+### Test Run 073 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-v1.0.4 portable deployment regression run)  
+**Failures:**  
+- None
+
+### Test Run 072 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-drag reliability fix regression run)  
+**Failures:**  
+- None
+
+### Test Run 071 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-v1.0.3 portable deployment regression run)  
+**Failures:**  
+- None
+
+### Test Run 070 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-detail-pane outbound drag-and-drop implementation regression run)  
+**Failures:**  
+- None
+
+### Test Run 069 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-v1.0.2 portable deployment regression run)  
+**Failures:**  
+- None
+
+### Test Run 068 - 2026-04-23
+**Configuration:** Debug x64  
+**Test count:** 57  
+**Passed:** 57  
+**Failed:** 0  
+**Skipped:** 0  
+**Duration:** N/A (post-detail-pane scale context-menu + persistence implementation regression run)  
+**Failures:**  
+- None
 
 ### Test Run 067 - 2026-04-23
 **Configuration:** Debug x64  

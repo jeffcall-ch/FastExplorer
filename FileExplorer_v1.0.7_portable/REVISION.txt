@@ -1,0 +1,20 @@
+﻿FileExplorer Revision Notes
+===========================
+
+Version: 1.0.7.0
+Date: 2026-04-23
+Type: Portable deployment update
+
+Updates in this revision:
+- Included latest detail-pane scaling and icon-rendering work-in-progress changes.
+- Row/font scaling behavior retained with icon-rendering pipeline refinements.
+- Known deferred issue: in some environments, icon size behavior under detail scaling can still be inconsistent.
+  This issue is acknowledged and deferred per user request.
+
+Deployment naming policy:
+- Executable deployment filename includes version by default in this package:
+  - FileExplorer_v1.0.7.exe
+
+Packaging notes:
+- Portable folder contains runtime essentials.
+- Data/config files are generated on first launch in the same folder.

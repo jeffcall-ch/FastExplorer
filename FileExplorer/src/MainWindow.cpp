@@ -36,6 +36,8 @@ constexpr int kWindowHeightMin = 480;
 
 constexpr UINT kMenuViewShowHidden = 40001;
 constexpr UINT kMenuViewShowExtensions = 40002;
+constexpr int kDetailScaleStepPercent = 5;
+constexpr UINT kMessageEnsureFileListFocus = WM_APP + 200;
 
 constexpr UINT_PTR kFolderRefreshDebounceTimerId = 9201;
 constexpr UINT kFolderRefreshDebounceMs = 500;
@@ -691,12 +693,37 @@ void MainWindow::ToggleShowExtensions() {
     DrawMenuBar(hwnd_);
 }
 
+void MainWindow::IncreaseDetailScale() {
+    const int next_detail_scale = Settings::ClampFileListDetailScalePercent(
+        settings_values_.file_list_detail_scale_percent + kDetailScaleStepPercent);
+    if (next_detail_scale == settings_values_.file_list_detail_scale_percent) {
+        return;
+    }
+
+    settings_values_.file_list_detail_scale_percent = next_detail_scale;
+    file_list_view_.SetDetailScalePercent(settings_values_.file_list_detail_scale_percent);
+    SaveLayoutSettings();
+}
+
+void MainWindow::ResetDetailScale() {
+    const int default_detail_scale = Settings::ClampFileListDetailScalePercent(100);
+    if (settings_values_.file_list_detail_scale_percent == default_detail_scale) {
+        return;
+    }
+
+    settings_values_.file_list_detail_scale_percent = default_detail_scale;
+    file_list_view_.SetDetailScalePercent(settings_values_.file_list_detail_scale_percent);
+    SaveLayoutSettings();
+}
+
 void MainWindow::LoadLayoutSettings() {
     settings_values_.sidebar_width_logical = sidebar_width_logical_;
     settings_values_.file_list_column_widths_logical = file_list_column_widths_logical_;
     settings_.Load(&settings_values_);
 
     sidebar_width_logical_ = Settings::ClampSidebarWidthLogical(settings_values_.sidebar_width_logical);
+    settings_values_.file_list_detail_scale_percent =
+        Settings::ClampFileListDetailScalePercent(settings_values_.file_list_detail_scale_percent);
     file_list_column_widths_logical_ = settings_values_.file_list_column_widths_logical;
 
     if (settings_values_.theme.empty()) {
@@ -705,6 +732,7 @@ void MainWindow::LoadLayoutSettings() {
 
     file_list_view_.SetShowHiddenFiles(settings_values_.show_hidden_files);
     file_list_view_.SetShowExtensions(settings_values_.show_extensions);
+    file_list_view_.SetDetailScalePercent(settings_values_.file_list_detail_scale_percent);
 
     const std::wstring settings_directory = ParentPath(settings_.storage_path());
     if (!settings_directory.empty()) {
@@ -756,6 +784,8 @@ void MainWindow::SaveLayoutSettings() const {
         : file_list_column_widths_logical_;
     values.show_hidden_files = settings_values_.show_hidden_files;
     values.show_extensions = settings_values_.show_extensions;
+    values.file_list_detail_scale_percent = Settings::ClampFileListDetailScalePercent(
+        settings_values_.file_list_detail_scale_percent);
     values.theme = settings_values_.theme.empty() ? L"dark" : settings_values_.theme;
 
     if (hwnd_ != nullptr) {
@@ -1670,6 +1700,7 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
         file_list_view_.SetColumnWidthsLogical(file_list_column_widths_logical_);
         file_list_view_.SetShowHiddenFiles(settings_values_.show_hidden_files);
         file_list_view_.SetShowExtensions(settings_values_.show_extensions);
+        file_list_view_.SetDetailScalePercent(settings_values_.file_list_detail_scale_percent);
         ApplyWindowChrome();
         UpdateWindowTitle();
         LayoutChildZones();
@@ -1686,9 +1717,29 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
 
     case WM_ACTIVATE:
         if (LOWORD(w_param) != WA_INACTIVE && file_list_hwnd_ != nullptr && !IsIconic(hwnd_)) {
-            SetFocus(file_list_hwnd_);
+            if (!PostMessageW(hwnd_, kMessageEnsureFileListFocus, 0, 0)) {
+                LogLastError(L"PostMessageW(kMessageEnsureFileListFocus WM_ACTIVATE)");
+            }
         }
         break;
+
+    case WM_ACTIVATEAPP:
+        if (w_param != FALSE && file_list_hwnd_ != nullptr && !IsIconic(hwnd_)) {
+            if (!PostMessageW(hwnd_, kMessageEnsureFileListFocus, 0, 0)) {
+                LogLastError(L"PostMessageW(kMessageEnsureFileListFocus WM_ACTIVATEAPP)");
+            }
+        }
+        break;
+
+    case kMessageEnsureFileListFocus:
+        if (file_list_hwnd_ != nullptr &&
+            !IsIconic(hwnd_) &&
+            GetForegroundWindow() == hwnd_ &&
+            IsWindowEnabled(file_list_hwnd_) &&
+            GetFocus() != file_list_hwnd_) {
+            SetFocus(file_list_hwnd_);
+        }
+        return 0;
 
     case WM_DISPLAYCHANGE:
         EnsureWindowPlacementVisible();
@@ -1735,6 +1786,27 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
 
         default:
             break;
+        }
+        break;
+    }
+
+    case WM_MBUTTONDOWN: {
+        POINT client_point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+        if (tab_strip_.CloseTabFromParentClientPoint(client_point)) {
+            return 0;
+        }
+        break;
+    }
+
+    case WM_NCMBUTTONDOWN: {
+        POINT screen_point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+        POINT client_point = screen_point;
+        if (!ScreenToClient(hwnd_, &client_point)) {
+            LogLastError(L"ScreenToClient(WM_NCMBUTTONDOWN)");
+            break;
+        }
+        if (tab_strip_.CloseTabFromParentClientPoint(client_point)) {
+            return 0;
         }
         break;
     }
@@ -1975,6 +2047,14 @@ LRESULT MainWindow::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) 
 
     case WM_FE_FILELIST_TOGGLE_SHOW_EXTENSIONS:
         ToggleShowExtensions();
+        return 0;
+
+    case WM_FE_FILELIST_INCREASE_DETAIL_SCALE:
+        IncreaseDetailScale();
+        return 0;
+
+    case WM_FE_FILELIST_RESET_DETAIL_SCALE:
+        ResetDetailScale();
         return 0;
 
     case WM_FE_FILELIST_STATUS_UPDATE: {

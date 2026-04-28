@@ -1,0 +1,21 @@
+﻿FileExplorer Revision Notes
+===========================
+
+Version: 1.0.2.0
+Date: 2026-04-23
+Type: Portable feature update
+
+Updates in this revision:
+- Added detail-pane accessibility scaling directly from right-click menu:
+  - Increase detail font + row spacing (+5%)
+  - Default detail font + row spacing
+- Detail-pane scaling is persistent between sessions using settings.ini.
+- Date Modified sort now places folders by timestamp alongside files (not pinned to top).
+
+Deployment naming policy:
+- Executable deployment filename includes version by default in this package:
+  - FileExplorer_v1.0.2.exe
+
+Packaging notes:
+- Portable folder contains only runtime essentials.
+- Data/config files are generated on first launch in the same folder.

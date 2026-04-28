@@ -11,10 +11,12 @@
 #include <memory>
 #include <string>
 #include <type_traits>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
 struct IContextMenu;
+struct IDataObject;
 
 namespace fileexplorer {
 
@@ -27,6 +29,8 @@ constexpr UINT WM_FE_FILELIST_ADD_FLYOUT_FAVOURITE = WM_APP + 111;
 constexpr UINT WM_FE_FILELIST_SORT_CHANGED = WM_APP + 112;
 constexpr UINT WM_FE_FILELIST_TOGGLE_SHOW_HIDDEN = WM_APP + 113;
 constexpr UINT WM_FE_FILELIST_TOGGLE_SHOW_EXTENSIONS = WM_APP + 114;
+constexpr UINT WM_FE_FILELIST_INCREASE_DETAIL_SCALE = WM_APP + 115;
+constexpr UINT WM_FE_FILELIST_RESET_DETAIL_SCALE = WM_APP + 116;
 
 enum class SortColumn {
     Name = 0,
@@ -106,6 +110,8 @@ public:
     bool show_hidden_files() const noexcept;
     void SetShowExtensions(bool show_extensions);
     bool show_extensions() const noexcept;
+    void SetDetailScalePercent(int detail_scale_percent);
+    int detail_scale_percent() const noexcept;
     void SetSortOrder(SortColumn sort_column, SortDirection sort_direction);
     SortColumn sort_column() const noexcept;
     SortDirection sort_direction() const noexcept;
@@ -116,6 +122,8 @@ public:
     bool HandleNotify(LPARAM l_param, LRESULT* result);
 
 private:
+    class OleDropTarget;
+
     enum class DateBucket {
         Today,
         Yesterday,
@@ -127,8 +135,12 @@ private:
     struct FontDeleter {
         void operator()(HFONT font) const noexcept;
     };
+    struct ImageListDeleter {
+        void operator()(HIMAGELIST image_list) const noexcept;
+    };
 
     using UniqueFont = std::unique_ptr<std::remove_pointer_t<HFONT>, FontDeleter>;
+    using UniqueImageList = std::unique_ptr<std::remove_pointer_t<HIMAGELIST>, ImageListDeleter>;
 
     static LRESULT CALLBACK ListViewSubclassProc(
         HWND hwnd,
@@ -159,13 +171,15 @@ private:
     void ApplyHeaderVisualStyle();
     void EnsureSystemImageList();
     void EnsureUiFonts();
+    void ApplyDetailScaleToListMetrics();
     void EnsureDividerFont();
 
-    bool HandleGetDispInfo(NMLVDISPINFOW* info) const;
+    bool HandleGetDispInfo(NMLVDISPINFOW* info);
     bool HandleColumnClick(int column_index);
     bool HandleCustomDraw(NMLVCUSTOMDRAW* custom_draw, LRESULT* result);
     bool HandleHeaderCustomDraw(NMCUSTOMDRAW* custom_draw, LRESULT* result) const;
     bool HandleDoubleClick(const NMITEMACTIVATE* item_activate);
+    bool HandleBeginDrag(const NMLISTVIEW* list_view);
     bool HandleItemChanging(const NMLISTVIEW* list_view, LRESULT* result) const;
     bool HandleItemChanged(const NMLISTVIEW* list_view);
     bool HandleClick(const NMITEMACTIVATE* item_activate);
@@ -198,10 +212,18 @@ private:
     int FocusedIndex() const;
     bool OpenEntryAtIndex(int index, bool open_files_too);
     void ShowContextMenu(POINT screen_point, int hit_index);
+    bool HandleExternalPathsDrop(const std::vector<std::wstring>& source_paths, bool move_drop, const POINT* client_point);
+    bool HandleOleDataObjectDrop(IDataObject* data_object, DWORD key_state, const POINT* client_point, DWORD* performed_effect);
+    DWORD ComputeDropEffectForDataObject(IDataObject* data_object, DWORD key_state) const;
+    bool ExtractSourcePathsFromDataObject(IDataObject* data_object, std::vector<std::wstring>* source_paths) const;
+    bool ImportVirtualFilesFromDataObject(IDataObject* data_object, const std::wstring& destination_path);
+    bool RegisterOleDropTarget();
+    void RevokeOleDropTarget();
     void DrawEmptyState(HDC hdc) const;
     int ResolveContextTargetIndex(int hit_index) const;
     std::vector<int> CollectSelectedSelectableIndices() const;
     std::vector<std::wstring> CollectPathsForIndices(const std::vector<int>& indices) const;
+    bool StartExternalDrag(const std::vector<std::wstring>& paths);
     void EnsureSingleSelectionAtIndex(int index);
     bool CopySelectionToClipboard(bool cut, int fallback_index);
     bool PasteFromClipboard();
@@ -215,6 +237,7 @@ private:
     std::wstring BuildUniqueNewFolderPath() const;
     void CaptureCurrentColumnWidths();
     void RequestRefresh();
+    bool AppendSevenZipContextMenu(HMENU menu, const std::wstring& path);
     bool AppendShellContextMenu(HMENU menu, const std::wstring& path, UINT first_id, UINT last_id);
     bool InvokeShellContextMenu(UINT command_id);
     void ClearShellContextMenu();
@@ -223,6 +246,7 @@ private:
     void RemoveCutPendingPaths(const std::vector<std::wstring>& paths);
     bool IsPathCutPending(const std::wstring& full_path) const;
     std::wstring BuildDisplayName(const FileEntry& entry) const;
+    int ResolveScaledSmallIconIndex(int system_icon_index);
 
     std::wstring BuildFullPath(const FileEntry& entry) const;
     static std::wstring NormalizePath(std::wstring path);
@@ -237,6 +261,7 @@ private:
     static int ResolveIconIndex(const std::wstring& full_path, bool is_folder);
     static COLORREF ColorForExtension(const std::wstring& extension, bool is_folder);
     static int ClampColumnWidthLogical(int column_index, int value) noexcept;
+    static int ClampDetailScalePercent(int value) noexcept;
     static DateBucket BucketForFileTime(const FILETIME& file_time);
     static const wchar_t* LabelForBucket(DateBucket bucket);
 
@@ -262,6 +287,10 @@ private:
     int list_font_height_{0};
     UniqueFont header_font_{nullptr};
     int header_font_height_{0};
+    int detail_scale_percent_{100};
+    UniqueImageList detail_row_height_image_list_{nullptr};
+    int detail_row_height_image_height_{0};
+    std::unordered_map<int, int> detail_row_height_icon_index_map_{};
 
     std::wstring type_ahead_buffer_{};
     DWORD type_ahead_last_tick_{0};
@@ -287,6 +316,11 @@ private:
     UINT shell_context_menu_first_id_{0};
     UINT shell_context_menu_last_id_{0};
     std::unordered_set<std::wstring> cut_pending_paths_{};
+    OleDropTarget* ole_drop_target_{nullptr};
+
+    bool drag_candidate_active_{false};
+    POINT drag_candidate_start_{};
+    int drag_candidate_index_{-1};
 };
 
 }  // namespace fileexplorer

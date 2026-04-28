@@ -1,0 +1,23 @@
+﻿FileExplorer Revision Notes
+===========================
+
+Version: 1.0.8.0
+Date: 2026-04-28
+Type: Portable deployment update
+
+Updates in this revision:
+- Added reliable middle-mouse tab close behavior (including parent/non-client fallback routing).
+- Includes detail-pane activation-focus restore fix for immediate arrow-key navigation after app re-activation.
+- Includes 7-Zip-only file-row context menu integration.
+- Includes expanded drag-in compatibility via OLE IDataObject formats (including virtual-file import path).
+
+Known issues:
+- Detail-pane icon-size behavior under scaling can still be inconsistent in some environments (deferred).
+
+Deployment naming policy:
+- Executable deployment filename includes version by default in this package:
+  - FileExplorer_v1.0.8.exe
+
+Packaging notes:
+- Portable folder contains runtime essentials.
+- Data/config files are generated on first launch in the same folder.

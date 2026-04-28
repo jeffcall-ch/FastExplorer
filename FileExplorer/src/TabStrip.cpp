@@ -158,7 +158,9 @@ bool TabStrip::IsDraggableGap(POINT parent_client_point) const {
     }
 
     POINT tab_point = parent_client_point;
-    if (MapWindowPoints(parent_hwnd_, hwnd_, &tab_point, 1) == 0) {
+    SetLastError(ERROR_SUCCESS);
+    MapWindowPoints(parent_hwnd_, hwnd_, &tab_point, 1);
+    if (GetLastError() != ERROR_SUCCESS) {
         return false;
     }
 
@@ -172,6 +174,29 @@ bool TabStrip::IsDraggableGap(POINT parent_client_point) const {
 
     const HitTestResult hit = HitTest(tab_point);
     return hit.part == HitPart::None;
+}
+
+bool TabStrip::CloseTabFromParentClientPoint(POINT parent_client_point) {
+    if (hwnd_ == nullptr || parent_hwnd_ == nullptr) {
+        return false;
+    }
+
+    POINT tab_point = parent_client_point;
+    SetLastError(ERROR_SUCCESS);
+    MapWindowPoints(parent_hwnd_, hwnd_, &tab_point, 1);
+    if (GetLastError() != ERROR_SUCCESS) {
+        return false;
+    }
+
+    RECT client_rect = {};
+    if (!GetClientRect(hwnd_, &client_rect)) {
+        return false;
+    }
+    if (!RectContainsPoint(client_rect, tab_point)) {
+        return false;
+    }
+
+    return CloseTabAtClientPoint(tab_point);
 }
 
 bool TabStrip::RegisterWindowClass() {
@@ -533,6 +558,80 @@ void TabStrip::HandleLeftButtonUp(POINT point) {
     }
 
     ResetTabDragState(true);
+}
+
+void TabStrip::RebuildLayoutForHitTesting() {
+    if (hwnd_ == nullptr) {
+        return;
+    }
+
+    HDC hdc = GetDC(hwnd_);
+    if (hdc == nullptr) {
+        return;
+    }
+
+    const int requested_pixel_height = -MulDiv(9, static_cast<int>(dpi_), 72);
+    if (font_ == nullptr || font_pixel_height_ != requested_pixel_height) {
+        font_.reset(CreateFontW(
+            requested_pixel_height,
+            0,
+            0,
+            0,
+            FW_NORMAL,
+            FALSE,
+            FALSE,
+            FALSE,
+            DEFAULT_CHARSET,
+            OUT_DEFAULT_PRECIS,
+            CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY,
+            DEFAULT_PITCH | FF_DONTCARE,
+            L"Segoe UI Variable Text"));
+        font_pixel_height_ = requested_pixel_height;
+    }
+
+    HFONT previous_font = nullptr;
+    if (font_ != nullptr) {
+        previous_font = static_cast<HFONT>(SelectObject(hdc, font_.get()));
+    }
+    RebuildLayout(hdc);
+    if (previous_font != nullptr) {
+        SelectObject(hdc, previous_font);
+    }
+
+    ReleaseDC(hwnd_, hdc);
+}
+
+bool TabStrip::CloseTabAtClientPoint(POINT point) {
+    if (tab_manager_ == nullptr) {
+        return false;
+    }
+
+    RebuildLayoutForHitTesting();
+
+    const HitTestResult hit = HitTest(point);
+    if (hit.part != HitPart::TabBody && hit.part != HitPart::CloseButton) {
+        return false;
+    }
+
+    if (!tab_manager_->CloseTab(hit.tabIndex)) {
+        return false;
+    }
+
+    NotifyParentTabsChanged();
+    Refresh();
+    return true;
+}
+
+void TabStrip::HandleMiddleButtonDown(POINT point) {
+    CloseTabAtClientPoint(point);
+}
+
+void TabStrip::HandleMiddleButtonUp(POINT point) {
+    // Intentionally no-op: middle-click close executes on button-down for
+    // better reliability with mouse drivers that do not consistently deliver
+    // middle-button-up over custom child windows.
+    (void)point;
 }
 
 void TabStrip::HandleTabDragMove(POINT point) {
@@ -971,6 +1070,19 @@ LRESULT TabStrip::HandleMessage(UINT message, WPARAM w_param, LPARAM l_param) {
     case WM_LBUTTONUP: {
         POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
         HandleLeftButtonUp(point);
+        return 0;
+    }
+
+    case WM_MBUTTONDOWN: {
+        SetFocus(parent_hwnd_);
+        POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+        HandleMiddleButtonDown(point);
+        return 0;
+    }
+
+    case WM_MBUTTONUP: {
+        POINT point = {GET_X_LPARAM(l_param), GET_Y_LPARAM(l_param)};
+        HandleMiddleButtonUp(point);
         return 0;
     }
 

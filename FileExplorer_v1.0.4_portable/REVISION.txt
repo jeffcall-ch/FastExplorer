@@ -1,0 +1,22 @@
+﻿FileExplorer Revision Notes
+===========================
+
+Version: 1.0.4.0
+Date: 2026-04-23
+Type: Portable bugfix release
+
+Updates in this revision:
+- Fixed drag behavior in detail pane:
+  - click-and-drag on selected items now reliably starts outbound drag.
+  - drag from Windows Explorer into detail pane is now accepted.
+- Inbound drop target behavior:
+  - drop on a folder row imports into that folder
+  - otherwise imports into current folder.
+
+Deployment naming policy:
+- Executable deployment filename includes version by default in this package:
+  - FileExplorer_v1.0.4.exe
+
+Packaging notes:
+- Portable folder contains only runtime essentials.
+- Data/config files are generated on first launch in the same folder.
